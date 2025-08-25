@@ -1,40 +1,28 @@
 @echo off
-setlocal EnableExtensions EnableDelayedExpansion
+setlocal
+set VENV=.venv-build
 
-REM ---- Python-Launcher bestimmen ----
-where py >nul 2>&1
-if %errorlevel%==0 (
-  set "PY=py -3"
-) else (
-  set "PY=python"
+REM venv anlegen/verwenden
+if not exist "%VENV%\Scripts\python.exe" (
+  py -3.10 -m venv "%VENV%"
 )
+call "%VENV%\Scripts\activate"
 
-REM ---- .venv erzeugen, falls nicht vorhanden ----
-if not exist ".venv\Scripts\python.exe" (
-  echo [INFO] Erstelle Virtualenv unter .venv ...
-  %PY% -m venv .venv || goto :error
-)
+python -m pip install -U pip wheel setuptools
+python -m pip install -r requirements.txt "PyInstaller>=6.0"
 
-REM ---- venv aktivieren ----
-call ".venv\Scripts\activate" || goto :error
+REM einmalig cleanen, dann BEIDE bauen (ohne zwischendurch dist löschen!)
+rmdir /s /q build dist 2>nul
 
-REM ---- Tools & Deps aktualisieren ----
-python -m ensurepip -U >nul 2>&1
-python -m pip install -q -U pip wheel setuptools || goto :error
+echo === Building pmveaver.spec ===
+python -m PyInstaller -y --clean --log-level=WARN pmveaver.spec       || goto :error
 
-REM ---- Projekt-Abhaengigkeiten ----
-if exist requirements.txt (
-  python -m pip install -q -r requirements.txt || goto :error
-) else (
-  echo [WARN] requirements.txt nicht gefunden – ueberspringe Installation.
-)
+echo === Building pmveaver_gui.spec ===
+python -m PyInstaller -y --clean --log-level=WARN pmveaver_gui.spec   || goto :error
 
-REM ---- PyInstaller installieren ----
-python -m pip install -q "pyinstaller>=6,<7" || goto :error
-
-REM ---- Builds (sauber, ohne Rueckfragen) ----
-pyinstaller -y --clean --log-level WARN random_clip_montage.spec || goto :error
-pyinstaller -y --clean --log-level WARN montage_gui.spec || goto :error
+REM --- ffmpeg/ffprobe ins dist kopieren ---
+copy /Y ffmpeg.exe  dist
+copy /Y ffprobe.exe dist
 
 echo.
 echo [OK] Build fertig. EXEs liegen in .\dist\

@@ -53,6 +53,9 @@ import sys
 import shutil
 import tempfile
 import atexit, signal
+import math
+import threading
+import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -64,11 +67,13 @@ from moviepy.editor import (
     CompositeAudioClip,
 )
 from moviepy.video.fx.resize import resize
-from moviepy.video.fx.all import margin, crop, mirror_x
+from moviepy.video.fx import all as vfx
 from tqdm import tqdm
 from PIL import Image as _PIL_Image
 
-SUPPORTED_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".mpg"}
+SUPPORTED_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".mpg", ".gif"}
+
+PREVIEW_INTERVAL = 5.0
 
 # ==== Robustness shims =======================================================
 
@@ -195,12 +200,33 @@ def cover_scale_and_crop(clip: VideoFileClip, target_w: int, target_h: int) -> V
     src_w, src_h = clip.size
     if src_w == 0 or src_h == 0:
         return clip
+
+    # Early exit: size already fitting
+    if src_w == target_w and src_h == target_h:
+        return clip
+
     scale = max(target_w / src_w, target_h / src_h)
-    new_w, new_h = int(src_w * scale), int(src_h * scale)
-    resized = resize(clip, newsize=(new_w, new_h))
-    x1 = max(0, (new_w - target_w) // 2)
-    y1 = max(0, (new_h - target_h) // 2)
-    return crop(resized, x1=x1, y1=y1, x2=x1 + target_w, y2=y1 + target_h)
+    new_w = int(round(src_w * scale))
+    new_h = int(round(src_h * scale))
+
+    resized = vfx.resize(clip, newsize=(new_w, new_h))
+
+    # Precise, symmetrical center crops with clamps
+    # (avoids 1px drift with odd differences)
+    dx = max(0, new_w - target_w)
+    dy = max(0, new_h - target_h)
+    x1 = int(round(dx / 2))
+    y1 = int(round(dy / 2))
+    x2 = x1 + target_w
+    y2 = y1 + target_h
+
+    # Safeguards (numerical edges)
+    x1 = max(0, min(x1, max(0, new_w - target_w)))
+    y1 = max(0, min(y1, max(0, new_h - target_h)))
+    x2 = min(new_w, max(target_w, x2))
+    y2 = min(new_h, max(target_h, y2))
+
+    return vfx.crop(resized, x1=x1, y1=y1, x2=x2, y2=y2)
 
 
 def letterbox(clip: VideoFileClip, target_w: int, target_h: int) -> VideoFileClip:
@@ -210,7 +236,7 @@ def letterbox(clip: VideoFileClip, target_w: int, target_h: int) -> VideoFileCli
     resized = resize(clip, newsize=(new_w, new_h))
     pad_x = (target_w - new_w) // 2
     pad_y = (target_h - new_h) // 2
-    return margin(
+    return vfx.margin(
         resized,
         left=pad_x,
         right=target_w - new_w - pad_x,
@@ -221,11 +247,11 @@ def letterbox(clip: VideoFileClip, target_w: int, target_h: int) -> VideoFileCli
 
 
 def make_triptych(clipA: VideoFileClip, clipB: VideoFileClip, target_w: int, target_h: int) -> CompositeVideoClip:
-    panel_w = target_w // 3
+    panel_w = math.ceil(target_w / 3)
     A_left  = cover_scale_and_crop(clipA, panel_w, target_h).set_position((0, 0))
     B_mid   = cover_scale_and_crop(clipB, panel_w, target_h).set_position((panel_w, 0))
-    A_right = mirror_x(cover_scale_and_crop(clipA, panel_w, target_h)).set_position((2 * panel_w, 0))
-    return CompositeVideoClip([A_left, B_mid, A_right], size=(3 * panel_w, target_h))
+    A_right = vfx.mirror_x(cover_scale_and_crop(clipA, panel_w, target_h)).set_position((2 * panel_w, 0))
+    return CompositeVideoClip([A_left, B_mid, A_right], size=(target_w, target_h))
 
 
 # ---------------- BPM helpers ----------------
@@ -438,6 +464,7 @@ def build_montage(
     min_beats: int,
     max_beats: int,
     beat_mode: float,
+    preview: bool,
 ):
     setup_tempfile_cleanup(out_path)
 
@@ -500,6 +527,11 @@ def build_montage(
                 use_land_next = False
 
                 src = VideoFileClip(str(src_path))
+
+                if not _can_read_first_frame(src):
+                    src.close()
+                    continue
+
                 source_clips.append(src)
 
                 # Segment duration per mode
@@ -535,6 +567,12 @@ def build_montage(
 
                 srcA = VideoFileClip(str(pathA))
                 srcB = VideoFileClip(str(pathB))
+
+                if not _can_read_first_frame(srcA) or not _can_read_first_frame(srcB):
+                    srcA.close()
+                    srcB.close()
+                    continue
+
                 source_clips.extend([srcA, srcB])
 
                 if effective_bpm and effective_bpm > 0:
@@ -583,7 +621,7 @@ def build_montage(
         segments[-1] = last.subclip(0, keep)
 
     # Concatenate (no crossfade)
-    montage = concatenate_videoclips(segments, method="compose")
+    montage = concatenate_videoclips(segments, method="chain")
     montage = montage.subclip(0, target_duration).set_fps(fps)
 
     # ----- Audio: normalize (+ optional denoise) -> (optional reverb) -> export stems -> mix with bg -----
@@ -629,7 +667,7 @@ def build_montage(
 
     # scale volumes
     clip_audio = clip_audio.volumex(clip_volume) if clip_audio else None
-    bg_track = AudioFileClip(str(audio_path)).set_duration(target_duration).volumex(bg_volume)
+    bg_track = bg_audio.set_duration(target_duration).volumex(bg_volume)
 
     if clip_audio is not None:
         composite_audio = CompositeAudioClip([bg_track, clip_audio.set_duration(target_duration)])
@@ -638,20 +676,62 @@ def build_montage(
 
     montage = montage.set_audio(composite_audio)
 
-    # --- Live preview via frame pipeline: save every 120th frame to a constant file
+    # --- Live preview via frame pipeline: save every 5 seconds to a constant file
     preview_path = out_path.parent / f"{out_path.stem}.preview.jpg"
-    frame_counter = {"i": -1}
 
+    from PIL import Image as _PIL_Image
+    import numpy as np, time, os
+
+    last_ts = 0.0
     def _preview_writer(frame):
-        frame_counter["i"] += 1
-        if frame_counter["i"] % 120 == 0:
-            try:
-                _PIL_Image.fromarray(frame).save(str(preview_path), format="JPEG", quality=90)
-            except Exception:
-                pass
+        nonlocal last_ts
+        now = time.monotonic()
+        if now - last_ts < PREVIEW_INTERVAL:
+            return frame
+        last_ts = now
+
+        try:
+            # Ensure we have a uint8 RGB array
+            if isinstance(frame, np.ndarray):
+                arr = frame
+                # If BGR (e.g. from OpenCV), swap – otherwise omit
+                # arr = arr[..., ::-1]  # only if you really have BGR
+                if arr.dtype != np.uint8:
+                    arr = arr.astype(np.uint8, copy=False)
+                img = _PIL_Image.fromarray(arr)
+            else:
+                img = _PIL_Image.fromarray(np.asarray(frame, dtype=np.uint8))
+
+            # Fit to bounding box 180x100 (no upscaling)
+            max_w, max_h = 180, 100
+            w, h = img.size
+            scale = min(1.0, max_w / w, max_h / h)
+            if scale < 1.0:
+                new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+                # BICUBIC ist schneller als LANCZOS und für Preview gut genug
+                img = img.resize(new_size, resample=_PIL_Image.BICUBIC)
+
+            # Write atomically: first .tmp, then os.replace
+            tmp_path = str(preview_path) + ".tmp"
+            img.save(
+                tmp_path,
+                format="JPEG",
+                quality=85,
+                optimize=True,
+                progressive=True,
+                subsampling=2
+            )
+            os.replace(tmp_path, str(preview_path))
+        except Exception:
+            # No hard error message in the render loop
+            pass
+
         return frame
 
-    montage_with_preview = montage.fl_image(_preview_writer)
+    if preview:
+        montage_with_preview = montage.fl_image(_preview_writer)
+    else:
+        montage_with_preview = montage
 
     # Write output
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -687,15 +767,22 @@ def build_montage(
     except Exception:
         pass
 
+def _can_read_first_frame(v: VideoFileClip) -> bool:
+    try:
+        _ = v.get_frame(0)
+        return True
+    except Exception:
+        return False
+
 def setup_tempfile_cleanup(out_path):
     def _cleanup():
         try:
-            # preview-Datei löschen
+            # Delete preview file
             preview = out_path.parent / f"{out_path.stem}.preview.jpg"
             if preview.exists():
                 preview.unlink()
 
-            # MoviePy-Tempfiles löschen
+            # Delete MoviePy temp files
             for f in out_path.parent.glob(f"{out_path.stem}TEMP_MPY_*"):
                 try:
                     f.unlink()
@@ -704,15 +791,49 @@ def setup_tempfile_cleanup(out_path):
         except Exception:
             pass
 
-    # bei normalem Exit
+    # on normal exit
     atexit.register(_cleanup)
 
-    # bei Abbruch-Signalen
+    # in case of abort signals
     def _handler(signum, frame):
         _cleanup()
         sys.exit(1)
     signal.signal(signal.SIGINT, _handler)
     signal.signal(signal.SIGTERM, _handler)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _handler)
+
+def start_stdin_exit_watcher(token: str = "__PMVEAVER_EXIT__"):
+    def _runner():
+        try:
+            if sys.stdin is None or sys.stdin.closed:
+                return
+            for line in sys.stdin:
+                if not line:
+                    break
+                if line.strip() == token:
+                    # Instead of sys.exit(0): send a signal to the main process.
+                    # This ensures that your signal/atexit handlers will work.
+                    try:
+                        # Windows: SIGBREAK exists; if not, use SIGINT
+                        if hasattr(signal, "SIGBREAK"):
+                            signal.raise_signal(signal.SIGBREAK)
+                        else:
+                            signal.raise_signal(signal.SIGINT)
+                    except Exception:
+                        # Fallbacks
+                        try:
+                            os.kill(os.getpid(), getattr(signal, "SIGINT", 2))
+                        except Exception:
+                            os.kill(os.getpid(), getattr(signal, "SIGTERM", 15))
+                    return
+        except Exception:
+            # At least trigger a gentle termination
+            try:
+                os.kill(os.getpid(), getattr(signal, "SIGINT", 2))
+            except Exception:
+                pass
+    threading.Thread(target=_runner, daemon=True).start()
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser()
@@ -749,11 +870,18 @@ def parse_args(argv=None):
     p.add_argument("--beat-mode", type=float, default=0.25,
                    help="Position des Wahrscheinlichkeitsmaximums zwischen min/max (0..1). Default 0.25 (=unterer Bereich).")
 
-    return p.parse_args(argv)
+    p.add_argument("--preview", choices=["true", "false"], default="true",
+                   help="Während des Renderns Preview-JPGs schreiben (true/false, default: true).")
+
+    args = p.parse_args(argv)
+    args.preview = (args.preview.lower() == "true")
+
+    return args
 
 
 def main(argv=None):
     args = parse_args(argv)
+    start_stdin_exit_watcher("__PMVEAVER_EXIT__")
     build_montage(
         audio_path=args.audio,
         videos_folder=args.videos,
@@ -776,6 +904,7 @@ def main(argv=None):
         min_beats=args.min_beats,
         max_beats=args.max_beats,
         beat_mode=args.beat_mode,
+        preview=args.preview,
     )
 
 

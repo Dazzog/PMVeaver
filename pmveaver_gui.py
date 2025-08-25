@@ -1,684 +1,1016 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-import os, sys, re, io, time, threading, subprocess, shutil
+# pmveaver_gui.py
+import os, sys, re, time, shutil, subprocess, threading,signal
 from pathlib import Path
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-from collections import OrderedDict
 
-try:
-    from PIL import Image, ImageTk
-    _PIL_OK = True
-except Exception:
-    _PIL_OK = False
+from PySide6 import QtCore, QtGui, QtWidgets
+import qdarktheme
 
-APP_TITLE = "Random Clip Montage – GUI"
+APP_TITLE = "PMVeaver"
 
-def hms(seconds: float) -> str:
-    if seconds is None or seconds < 0: return "—"
-    s = int(seconds); h, rem = divmod(s, 3600); m, s = divmod(rem, 60)
-    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+# Progress-Gewichte
+STEP_WEIGHTS = {
+    "collecting clips": (0.0, 0.1),
+    "building video": (0.1, 0.125),
+    "writing audio": (0.125, 0.15),
+    "writing video": (0.15, 1.00),
+}
+STEP_ORDER = list(STEP_WEIGHTS.keys())
+
+# ---------------- Codec-Presets / Profile (aus deinem Tkinter-Original übernommen/vereinfacht) ------------
+CODEC_PRESETS = {
+    "libx264":     ["placebo","veryslow","slower","slow","medium","fast","faster","veryfast","superfast","ultrafast"],
+    "libx265":     ["placebo","veryslow","slower","slow","medium","fast","faster","veryfast","superfast","ultrafast"],
+    "h264_nvenc":  ["slow","medium","fast","hp","hq","ll","llhq","llhp","lossless","losslesshp"],
+    "hevc_nvenc":  ["slow","medium","fast","hp","hq","ll","llhq","llhp","lossless","losslesshp"],
+    "h264_qsv":    ["veryslow","slower","slow","medium","fast","faster","veryfast"],
+    "h264_amf":    ["balanced","speed","quality"],
+    "prores_ks":   [],
+    "libvpx-vp9":  [],
+}
+DEFAULT_PRESET_BY_CODEC = {
+    "libx264": "medium", "libx265": "medium",
+    "h264_nvenc": "hq",  "hevc_nvenc": "hq",
+    "h264_qsv": "medium",
+    "h264_amf": "balanced",
+    "prores_ks": "", "libvpx-vp9": ""
+}
+RENDER_PROFILES = {
+    "CPU (x264)":      {"codec": "libx264",   "preset": "medium",  "threads": "8", "bitrate": "8M"},
+    "NVIDIA GPU":      {"codec": "h264_nvenc","preset": "hq",      "threads": "",  "bitrate": "8M"},
+    "AMD GPU":         {"codec": "h264_amf",  "preset": "quality", "threads": "",  "bitrate": "8M"},
+    "Intel GPU (QSV)": {"codec": "h264_qsv",  "preset": "medium",  "threads": "",  "bitrate": "8M"},
+}
+
+ERROR_CSS = "QLineEdit{border:1px solid #d9534f; border-radius:4px;}"  # rot
+OK_CSS    = ""  # Default-Style
+
+def _norm(p: str) -> str:
+    return os.path.normpath(os.path.expandvars(os.path.expanduser(p or "")))
 
 def _base_dir() -> Path:
     return Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 
 def _find_cli_candidate():
-    """Bevorzuge pmveaver.exe neben der GUI, sonst pmveaver.py."""
+    """Bevorzuge pmveaver.exe neben der GUI, sonst pmveaver.py (im selben Ordner)."""
     base = _base_dir()
     cand_exe = base / "pmveaver.exe"
     if cand_exe.exists():
-        return cand_exe, True
+        return str(cand_exe), True
     cand_py = base / "pmveaver.py"
     if cand_py.exists():
-        return cand_py, False
-    # Fallback: neben der Quelle
-    return Path(__file__).with_name("pmveaver.py"), False
+        return str(cand_py), False
+    # Fallback: im Arbeitsverzeichnis suchen
+    if Path("pmveaver.exe").exists():
+        return "pmveaver.exe", True
+    if Path("pmveaver.py").exists():
+        return "pmveaver.py", False
+    return None, None
 
-def which_ffmpeg_bins():
-    """Suche ffmpeg/ffprobe in PATH, ansonsten neben der EXE/GUI."""
-    ffm, ffp = shutil.which("ffmpeg"), shutil.which("ffprobe")
-    if not ffm or not ffp:
-        base = _base_dir()
-        cand_ffm = base / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
-        cand_ffp = base / ("ffprobe.exe" if os.name == "nt" else "ffprobe")
-        if cand_ffm.exists(): ffm = str(cand_ffm)
-        if cand_ffp.exists(): ffp = str(cand_ffp)
-    return ffm, ffp
+def hms(seconds: float) -> str:
+    if seconds is None or seconds < 0:
+        return "—"
+    s = int(seconds)
+    h, rem = divmod(s, 3600); m, s = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
-def _norm(p: str) -> str:
-    try: return os.path.normpath(p)
-    except Exception: return p
+class PMVeaverQt(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(APP_TITLE)
 
-class PMVeaverGUI(tk.Tk):
-    RE_TIME = re.compile(r"time=(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)")
-    RE_PCT  = re.compile(r'(\d{1,3}(?:\.\d+)?)\s*%')
-    RE_FRAC = re.compile(r'(\d+(?:\.\d+)?)[ ]*/[ ]*(\d+(?:\.\d+)?)')
+        # --- System-Dark/Light automatisch
+        qdarktheme.setup_theme(theme="auto", custom_colors={"primary": "#8571c9"})
 
-    STEP_WEIGHTS = OrderedDict([
-        ("collecting clips", (0.00, 0.10)),
-        ("building", (0.10, 0.125)),
-        ("writing audio", (0.125, 0.15)),
-        ("writing video", (0.15, 1.00)),
-    ])
+        # ---------- State ----------
+        self.proc: QtCore.QProcess | None = None
+        self.running = False
+        self._aborted = False
+        self._current_line = ""
+        self._last_step_pct = None
+        self._start_time = None
+        self._phase = "—"
+        self._overall_progress = 0.0
+        self._last_preview_check = 0.0
 
-    STEP_ORDER = list(STEP_WEIGHTS.keys())
 
-    def __init__(self):
-        super().__init__()
-        self.title(APP_TITLE)
-
-        # state
-        self.proc=None; self.running=False; self._aborted=False
-        self._current_line=""; self._last_step_pct=None; self._last_frac=(None,None)
-        self._target_total_secs=None; self._start_time=None
-        self._phase="—"; self._phase_idx=-1
-        self._overall_progress=0.0
-
-        # preview state
-        self._preview_candidates=[]
-        self._preview_path=None
-        self._preview_mtime=None
-        self._preview_tkimg=None
-        self._preview_target_h = 100
-        self._preview_max_w    = 180
-
-        # form vars
-        self.var_audio=tk.StringVar(); self.var_videos=tk.StringVar(); self.var_output=tk.StringVar()
-        self.var_width=tk.StringVar(value="1920"); self.var_height=tk.StringVar(value="1080")
-        self.var_fps=tk.StringVar(value="30")
-        self.var_bg_vol=tk.DoubleVar(value=1.0)   # „Audio Volume“
-        self.var_clip_vol=tk.DoubleVar(value=0.8)
-        self.var_clip_reverb=tk.DoubleVar(value=0.2)
-        self.var_min_seconds=tk.StringVar(value="2.0"); self.var_max_seconds=tk.StringVar(value="5.0")
-        self.var_bpm_detect=tk.BooleanVar(value=True)  # default ON
-        self.var_bpm=tk.StringVar(value="")
-        self.var_min_beats=tk.IntVar(value=2); self.var_max_beats=tk.IntVar(value=8); self.var_beat_mode=tk.DoubleVar(value=0.25)
-        self.var_codec=tk.StringVar(value="libx264"); self.var_audio_codec=tk.StringVar(value="aac")
-        self.var_preset=tk.StringVar(value="medium"); self.var_bitrate=tk.StringVar(value=""); self.var_threads=tk.StringVar(value="")
-
-        # Standard-Ordner für Videos erraten
-        try:
-            cwd = os.getcwd()
-            entries = {entry.lower(): entry for entry in os.listdir(cwd)}
-            for name in ["videos", "clips", "input", "inputs", "source", "sources", "footage"]:
-                if name.lower() in entries:
-                    candidate = os.path.join(cwd, entries[name.lower()])
-                    if os.path.isdir(candidate):
-                        self.var_videos.set(_norm(candidate))
-                        break
-        except:
-            pass
-
-        self.entry_bpm=None  # widget handle
-
+        # ---------- UI ----------
         self._build_ui()
+        self._apply_profile()        # initiale Profileinstellungen
+        self._sync_preset_choices()  # Preset-Auswahl zum Codec
+        self._sync_bpm_ui()
+
+        # Ticker für ETA/Preview
+        self._timer = QtCore.QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(200)
+
+    # ===================== UI =====================
+    def _build_ui(self):
+        root = QtWidgets.QVBoxLayout(self)
+
+        # ----- Sources / Output (separat, NICHT im Accordion)
+        src_group = QtWidgets.QGroupBox("Sources / Output")
+        src_form = QtWidgets.QGridLayout(src_group)
+
+        self.ed_audio  = QtWidgets.QLineEdit()
+        self.ed_videos = QtWidgets.QLineEdit()
+        self.ed_output = QtWidgets.QLineEdit()
+        self.ed_audio.editingFinished.connect(self._autofill_output_from_audio)
+        self._autofill_video_folder()
+
+        btn_audio  = QtWidgets.QPushButton("Browse…")
+        btn_audio.clicked.connect(self._browse_audio)
+        btn_videos = QtWidgets.QPushButton("Browse…")
+        btn_videos.clicked.connect(self._browse_videos)
+        btn_output = QtWidgets.QPushButton("Browse…")
+        btn_output.clicked.connect(self._browse_output)
+
+        src_form.addWidget(QtWidgets.QLabel("Audio:"),       0, 0)
+        src_form.addWidget(self.ed_audio,                    0, 1)
+        src_form.addWidget(btn_audio,                        0, 2)
+        src_form.addWidget(QtWidgets.QLabel("Video folder:"),1, 0)
+        src_form.addWidget(self.ed_videos,                   1, 1)
+        src_form.addWidget(btn_videos,                       1, 2)
+        src_form.addWidget(QtWidgets.QLabel("Output file:"), 2, 0)
+        src_form.addWidget(self.ed_output,                   2, 1)
+        src_form.addWidget(btn_output,                       2, 2)
+        src_form.setColumnStretch(1, 1)
+        root.addWidget(src_group)
+
+        # ----- Accordion (QToolBox) für alle restlichen Frames
+        acc = QtWidgets.QToolBox()
+        acc.addItem(self._panel_frame_render(), "Frame / Render")
+        acc.addItem(self._panel_audio_mix(),    "Audio Mix")
+        acc.addItem(self._panel_bpm(),          "BPM / Beat lengths")
+        acc.addItem(self._panel_time_fallback(),"Time-based fallback (when BPM disabled)")
+        acc.addItem(self._panel_codecs(),       "Codecs / Performance")
+        root.addWidget(acc)
+
+        # ----- Progress
+        prog_group = QtWidgets.QGroupBox("Progress")
+        pg = QtWidgets.QHBoxLayout(prog_group)
+        pg.setSpacing(16)
+
+        # Preview
+        self.lbl_preview = QtWidgets.QLabel("No preview")
+        self.lbl_preview.setFixedSize(180, 100)
+        self.lbl_preview.setAlignment(QtCore.Qt.AlignCenter)
+
+        self._preview_pix = None
+        self.lbl_preview.installEventFilter(self)
+
+        pg.addWidget(self.lbl_preview)
+
+        # Step/Elapsed/ETA + Progressbars
+        right_box = QtWidgets.QVBoxLayout()
+
+        # Current step + Elapsed/ETA des aktuellen Steps
+        row1 = QtWidgets.QHBoxLayout()
+        row1.addWidget(QtWidgets.QLabel("▼ Current step:"))
+        self.lbl_step = QtWidgets.QLabel("—")
+        row1.addWidget(self.lbl_step)
+        row1.addStretch()
+
+        self.lbl_elapsed_step = QtWidgets.QLabel("Elapsed (Current step): —")
+        self.lbl_eta_step = QtWidgets.QLabel("ETA (Current step): —")
+        row1.addWidget(self.lbl_elapsed_step)
+        row1.addSpacing(10)
+        row1.addWidget(self.lbl_eta_step)
+        right_box.addLayout(row1)
+
+        # Zeile 2: Step-Progress
+        row2 = QtWidgets.QHBoxLayout()
+        self.pb_step = QtWidgets.QProgressBar()
+        self.pb_step.setRange(0, 100)
+        self.pb_step.setValue(0)
+        row2.addWidget(self.pb_step, stretch=1)
+        right_box.addLayout(row2)
+
+        # Zeile 3: Total-Progress
+        row3 = QtWidgets.QHBoxLayout()
+        self.pb_total = QtWidgets.QProgressBar()
+        self.pb_total.setRange(0, 100)
+        self.pb_total.setValue(0)
+        row3.addWidget(self.pb_total, stretch=1)
+        right_box.addLayout(row3)
+
+        # Total
+        row_total = QtWidgets.QHBoxLayout()
+        row_total.addWidget(QtWidgets.QLabel("▲ Total"))
+        row_total.addStretch()
+        self.lbl_elapsed_total = QtWidgets.QLabel("Elapsed (Total): —")
+        row_total.addWidget(self.lbl_elapsed_total)
+        right_box.addLayout(row_total)
+
+        pg.addLayout(right_box)
+
+        root.addWidget(prog_group)
+
+        # ----- Buttons + FFmpeg-Status
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.setSpacing(12)
+        btn_row.setContentsMargins(0, 8, 0, 0)
+
+        self.btn_start = QtWidgets.QPushButton("Start")
+        self.btn_start.setObjectName("btnStart")
+        self.btn_start.clicked.connect(self.start)
+        self.btn_start.setCursor(QtCore.Qt.PointingHandCursor)
+        self.btn_start.setMinimumHeight(44)  # << größer
+        self.btn_start.setSizePolicy(QtWidgets.QSizePolicy.Expanding,
+                                     QtWidgets.QSizePolicy.Fixed)
+
+        # größere, fette Schrift
+        f = self.btn_start.font()
+        f.setBold(True)
+        f.setPointSize(int(f.pointSize() * 1.15))
+        self.btn_start.setFont(f)
+        # Icon (systemweit) – optional, aber wertig
+        self.btn_start.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_MediaPlay))
+        self.btn_start.setIconSize(QtCore.QSize(24, 24))
+        # Primär-Style (farblich zum Theme passend)
+        self.btn_start.setStyleSheet("""
+        QPushButton#btnStart {
+            border-radius: 8px;
+            padding: 8px 18px;
+        }
+        """)
+
+        self.btn_stop = QtWidgets.QPushButton("Stop")
+        self.btn_stop.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_MediaStop))
+        self.btn_stop.clicked.connect(self.stop)
+        self.btn_stop.setEnabled(False)
+
+        btn_row.addWidget(self.btn_start); btn_row.addWidget(self.btn_stop); btn_row.addStretch(1)
+
+        self.lbl_ffmpeg = QtWidgets.QLabel("FFmpeg: …")
+        btn_row.addWidget(self.lbl_ffmpeg)
+        root.addLayout(btn_row)
+
+        # Auto-Größe
+        self.resize(900, 700)
+
         self._check_ffmpeg()
 
-        # BPM-UI-Verhalten
-        self.var_bpm_detect.trace_add("write", lambda *_: self._sync_bpm_ui())
-        self.var_bpm.trace_add("write", lambda *_: self._on_bpm_text_change())
-        self._sync_bpm_ui()
+        for le in (self.ed_audio, self.ed_videos, self.ed_output):
+            le.textChanged.connect(lambda _=None: self._validate_inputs(False))
 
-        self.after(50, self._autosize_window)
-        self.after(200, self._tick)
-        self.after(300, self._preview_tick)
+    # ----------------- Panels -----------------
+    def _panel_frame_render(self):
+        w = QtWidgets.QWidget();
+        g = QtWidgets.QGridLayout(w)
 
-    # ---------- UI ----------
-    def _build_ui(self):
-        pad={"padx":8,"pady":6}
+        self.sb_w = QtWidgets.QSpinBox();
+        self.sb_w.setRange(16, 16384);
+        self.sb_w.setValue(1920);
+        self.sb_w.setSuffix(" px")
+        self.sb_h = QtWidgets.QSpinBox();
+        self.sb_h.setRange(16, 16384);
+        self.sb_h.setValue(1080);
+        self.sb_h.setSuffix(" px")
+        self.sb_fps = QtWidgets.QSpinBox();
+        self.sb_fps.setRange(1, 240);
+        self.sb_fps.setValue(30);
+        self.sb_fps.setSuffix(" fps")
 
-        # --- Sources / Output (Grid -> saubere Ausrichtung) ---
-        frm_top=ttk.LabelFrame(self,text="Sources / Output")
-        frm_top.pack(fill="x",**pad)
-        src = ttk.Frame(frm_top); src.pack(fill="x",padx=8,pady=4)
+        # Alle drei gleichmäßig dehnbar machen
+        for sb in (self.sb_w, self.sb_h, self.sb_fps):
+            sb.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            sb.setMinimumWidth(80)
 
-        ttk.Label(src, text="Audio:", anchor="e").grid(row=0, column=0, sticky="e")
-        self.entry_audio = ttk.Entry(src, textvariable=self.var_audio)
-        self.entry_audio.grid(row=0, column=1, sticky="we", padx=(8,8))
-        ttk.Button(src, text="Browse…", command=self._browse_audio).grid(row=0, column=2, sticky="e")
+        lab_w = QtWidgets.QLabel("Width");
+        lab_w.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        lab_h = QtWidgets.QLabel("Height");
+        lab_h.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        lab_f = QtWidgets.QLabel("FPS");
+        lab_f.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
 
-        ttk.Label(src, text="Video folder:", anchor="e").grid(row=1, column=0, sticky="e", pady=(6,0))
-        self.entry_videos = ttk.Entry(src, textvariable=self.var_videos)
-        self.entry_videos.grid(row=1, column=1, sticky="we", padx=(8,8), pady=(6,0))
-        ttk.Button(src, text="Browse…", command=self._browse_videos).grid(row=1, column=2, sticky="e", pady=(6,0))
+        g.addWidget(lab_w, 0, 0);
+        g.addWidget(self.sb_w, 0, 1)
+        g.addWidget(lab_h, 0, 2);
+        g.addWidget(self.sb_h, 0, 3)
+        g.addWidget(lab_f, 0, 4);
+        g.addWidget(self.sb_fps, 0, 5)
 
-        ttk.Label(src, text="Output file:", anchor="e").grid(row=2, column=0, sticky="e", pady=(6,0))
-        self.entry_output = ttk.Entry(src, textvariable=self.var_output)
-        self.entry_output.grid(row=2, column=1, sticky="we", padx=(8,8), pady=(6,0))
-        ttk.Button(src, text="Browse…", command=self._browse_output).grid(row=2, column=2, sticky="e", pady=(6,0))
+        # alle drei Spinbox-Spalten gleich stretchen
+        for col in (1, 3, 5):
+            g.setColumnStretch(col, 1)
+        # Labels schmal halten
+        for col in (0, 2, 4):
+            g.setColumnMinimumWidth(col, 80)
 
-        src.columnconfigure(1, weight=1)
+        return w
 
-        # --- Frame & Render ---
-        frm_render=ttk.LabelFrame(self,text="Frame & Render")
-        frm_render.pack(fill="x",**pad)
-        grid=ttk.Frame(frm_render); grid.pack(fill="x",padx=8,pady=4)
-        self._labeled_entry(grid,"Width", self.var_width,0,0,10)
-        self._labeled_entry(grid,"Height",self.var_height,0,2,10)
-        self._labeled_entry(grid,"FPS",   self.var_fps,  0,4,10)
+    def _panel_audio_mix(self):
+        w = QtWidgets.QWidget()
+        g = QtWidgets.QGridLayout(w)
 
-        # --- Audio Mix ---
-        frm_audio=ttk.LabelFrame(self,text="Audio Mix")
-        frm_audio.pack(fill="x",**pad)
-        vg=ttk.Frame(frm_audio); vg.pack(fill="x",padx=8,pady=4)
-        self._labeled_scale(vg, "Audio Volume", self.var_bg_vol,      0, 0, 0.0, 2.0, 0.01, colspan=1)
-        self._labeled_scale(vg, "Clip Volume",  self.var_clip_vol,    0, 3, 0.0, 2.0, 0.01, colspan=1)
-        self._labeled_scale(vg, "Clip Reverb",  self.var_clip_reverb, 0, 6, 0.0, 1.0, 0.01, colspan=1)
+        # Slider (intern 0..200 bzw. 0..100)
+        def slider(init, to=200):
+            s = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+            s.setRange(0, to)
+            s.setValue(init)
+            return s
 
-        # --- BPM ---
-        frm_bpm=ttk.LabelFrame(self,text="BPM / Beat lengths")
-        frm_bpm.pack(fill="x",**pad)
-        bg=ttk.Frame(frm_bpm); bg.pack(fill="x",padx=8,pady=4)
-        self.chk_bpm = ttk.Checkbutton(bg,text="Automatically detect BPM (librosa)",variable=self.var_bpm_detect)
-        self.chk_bpm.grid(row=0,column=0,columnspan=4,sticky="w",pady=(0,6))
+        self.sl_bg = slider(100)  # 1.00x
+        self.sl_clip = slider(80)  # 0.80x
+        self.sl_rev = slider(20, to=100)  # 0.20
 
-        ttk.Label(bg,text="BPM (manual)").grid(row=1,column=0,sticky="w")
-        self.entry_bpm = ttk.Entry(bg,textvariable=self.var_bpm,width=10)
-        self.entry_bpm.grid(row=1,column=1,sticky="w",padx=(6,18))
+        # Editierbare Zahlenfelder (anzeigen + tippen erlaubt)
+        def dspin(minv, maxv, init, step=0.01, suffix="x"):
+            ds = QtWidgets.QDoubleSpinBox()
+            ds.setRange(minv, maxv)
+            ds.setDecimals(2)
+            ds.setSingleStep(step)
+            ds.setValue(init)
+            ds.setSuffix(suffix)
+            ds.setFixedWidth(72)
+            return ds
 
-        self._labeled_spin(bg,"Min beats",self.var_min_beats,1,2,2,64,2)
-        self._labeled_spin(bg,"Max beats",self.var_max_beats,1,4,2,64,2)
+        self.ds_bg = dspin(0.00, 2.00, 1.00, suffix="")
+        self.ds_clip = dspin(0.00, 2.00, 0.80, suffix="")
+        self.ds_rev = dspin(0.00, 1.00, 0.20, suffix="")
 
-        self._labeled_scale(bg, "Beat mode (0..1, peak position)", self.var_beat_mode,
-                            2, 0, 0.0, 1.0, 0.01, colspan=5, fmt="{:.2f}")
-        bg.columnconfigure(1, weight=1)
+        # Bidirektionale Verdrahtung (Slider <-> SpinBox)
+        self.sl_bg.valueChanged.connect(lambda v: self.ds_bg.setValue(v / 100.0))
+        self.ds_bg.valueChanged.connect(lambda val: self.sl_bg.setValue(int(round(val * 100))))
 
-        # --- Time-based fallback ---
-        frm_time=ttk.LabelFrame(self,text="Time-based fallback (when BPM disabled)")
-        frm_time.pack(fill="x",**pad)
-        tg=ttk.Frame(frm_time); tg.pack(fill="x",padx=8,pady=4)
-        self._labeled_entry(tg,"Min seconds",self.var_min_seconds,0,0,10)
-        self._labeled_entry(tg,"Max seconds",self.var_max_seconds,0,2,10)
+        self.sl_clip.valueChanged.connect(lambda v: self.ds_clip.setValue(v / 100.0))
+        self.ds_clip.valueChanged.connect(lambda val: self.sl_clip.setValue(int(round(val * 100))))
 
-        # --- Codecs & Performance ---
-        frm_codec=ttk.LabelFrame(self,text="Codecs & Performance")
-        frm_codec.pack(fill="x",**pad)
-        cg=ttk.Frame(frm_codec); cg.pack(fill="x",padx=8,pady=4)
-        self._labeled_combo(cg,"Video codec",self.var_codec,0,0,
-                            ["libx264","libx265","h264_nvenc","hevc_nvenc","prores_ks","libvpx-vp9"],
-                            pady=(0,8))
-        self._labeled_combo(cg,"Audio codec",self.var_audio_codec,0,2,
-                            ["aac","libopus","libmp3lame"],
-                            pady=(0,8))
-        self._labeled_combo(cg,"Preset",self.var_preset,0,4,
-                            ["ultrafast","superfast","veryfast","faster","fast","medium","slow","slower","veryslow"],
-                            pady=(0,8))
-        self._labeled_entry(cg,"Bitrate (e.g., 8M)",self.var_bitrate,1,0,12).grid_configure(pady=(0,0))
-        self._labeled_entry(cg,"Threads",self.var_threads,1,2,8).grid_configure(pady=(0,0))
-        cg.columnconfigure(5,weight=1)
+        self.sl_rev.valueChanged.connect(lambda v: self.ds_rev.setValue(v / 100.0))
+        self.ds_rev.valueChanged.connect(lambda val: self.sl_rev.setValue(int(round(val * 100))))
 
-        # --- Progress + Preview ---
-        frm_prog=ttk.LabelFrame(self,text="Progress")
-        frm_prog.pack(fill="x",**pad)
-        inner=ttk.Frame(frm_prog); inner.pack(fill="x",padx=8,pady=6)
+        # Layout: [Label | Slider | Zahl] x 3 – Slider-Spalten gleich stretchen
+        row = 0
+        g.addWidget(QtWidgets.QLabel("Audio Volume"), row, 0)
+        g.addWidget(self.sl_bg, row, 1)
+        g.addWidget(self.ds_bg, row, 2)
 
-        # links: Preview
-        left = ttk.Frame(inner)
-        left.grid(row=0, column=0, sticky="nw", padx=(0,12))
-        self.lbl_preview = ttk.Label(left)
-        self.lbl_preview.pack()
+        g.addWidget(QtWidgets.QLabel("Clip Volume"), row, 3)
+        g.addWidget(self.sl_clip, row, 4)
+        g.addWidget(self.ds_clip, row, 5)
 
-        # rechts: Progress
-        right = ttk.Frame(inner)
-        right.grid(row=0, column=1, sticky="nsew")
-        inner.columnconfigure(1, weight=1)
+        g.addWidget(QtWidgets.QLabel("Clip Reverb"), row, 6)
+        g.addWidget(self.sl_rev, row, 7)
+        g.addWidget(self.ds_rev, row, 8)
 
-        ttk.Label(right,text="Current step:").grid(row=0,column=0,sticky="w")
-        self.var_step=tk.StringVar(value="—")
-        ttk.Label(right,textvariable=self.var_step).grid(row=0,column=1,columnspan=2,sticky="w",padx=(6,0))
-        self.lbl_elapsed=ttk.Label(right,text="Elapsed: —"); self.lbl_elapsed.grid(row=0,column=3,sticky="e")
-        self.lbl_eta=ttk.Label(right,text="ETA: —"); self.lbl_eta.grid(row=0,column=4,sticky="e",padx=(8,0))
+        # Alle drei Slider-Spalten gleich verteilen
+        for col in (1, 4, 7):
+            g.setColumnStretch(col, 1)
 
-        self.pb_step=ttk.Progressbar(right,orient="horizontal",mode="determinate",maximum=100,value=0)
-        self.pb_step.grid(row=1,column=0,columnspan=4,sticky="we",pady=(4,2))
-        self.lbl_step_pct=ttk.Label(right,text="0%"); self.lbl_step_pct.grid(row=1,column=4,sticky="e",padx=(8,0))
-        right.columnconfigure(1, weight=1)
-        right.columnconfigure(2, weight=1)
+        # (optional) Labels auf minimale Breite bringen, damit’s sauber aussieht
+        for col in (0, 3, 6):
+            g.setColumnMinimumWidth(col, 90)
 
-        ttk.Label(right,text="Total progress:").grid(row=2,column=0,sticky="w",pady=(6,0))
-        self.pb_total=ttk.Progressbar(right,orient="horizontal",mode="determinate",maximum=100,value=0)
-        self.pb_total.grid(row=3,column=0,columnspan=4,sticky="we")
-        self.lbl_total_pct=ttk.Label(right,text="0%"); self.lbl_total_pct.grid(row=3,column=4,sticky="e",padx=(8,0))
+        return w
 
-        # --- Buttons + FFmpeg-Check ganz unten ---
-        frm_btns=ttk.Frame(self)
-        frm_btns.pack(fill="x",**pad)
-        self.btn_start=ttk.Button(frm_btns,text="Start",command=self.start)
-        self.btn_stop =ttk.Button(frm_btns,text="Stop", command=self.stop,state="disabled")
-        self.btn_start.pack(side="left")
-        self.btn_stop.pack(side="left",padx=(6,0))
-        self.lbl_ffmpeg=ttk.Label(frm_btns,text="FFmpeg: …")
-        self.lbl_ffmpeg.pack(side="right")
+    def _panel_bpm(self):
+        w = QtWidgets.QWidget(); g = QtWidgets.QGridLayout(w)
+        self.chk_bpm = QtWidgets.QCheckBox("Automatically detect BPM (librosa)")
+        self.chk_bpm.setChecked(True)
+        self.chk_bpm.toggled.connect(self._sync_bpm_ui)
+        g.addWidget(self.chk_bpm, 0,0,1,6)
 
-    # ----- autosize -----
-    def _autosize_window(self):
-        self.update_idletasks()
-        req_w=self.winfo_reqwidth(); req_h=self.winfo_reqheight()
-        max_w=int(self.winfo_screenwidth()*0.9); max_h=int(self.winfo_screenheight()*0.9)
-        final_w=min(req_w+20, max_w); final_h=min(req_h+20, max_h)
-        self.geometry(f"{final_w}x{final_h}")
-        self.minsize(final_w, final_h)
+        self.ed_bpm = QtWidgets.QLineEdit(); self.ed_bpm.setPlaceholderText("BPM (manual)")
+        g.addWidget(QtWidgets.QLabel("BPM (manual)"), 1,0)
+        g.addWidget(self.ed_bpm,                     1,1)
 
-    # ---- labeled helpers ----
-    def _labeled_entry(self,parent,label,var,r,c,width=10):
-        ttk.Label(parent,text=label).grid(row=r,column=c,sticky="w")
-        e=ttk.Entry(parent,textvariable=var,width=width)
-        e.grid(row=r,column=c+1,sticky="w",padx=(6,18))
-        return e
+        self.sb_min_beats = QtWidgets.QSpinBox(); self.sb_min_beats.setRange(2,64); self.sb_min_beats.setSingleStep(2); self.sb_min_beats.setValue(2)
+        self.sb_max_beats = QtWidgets.QSpinBox(); self.sb_max_beats.setRange(2,64); self.sb_max_beats.setSingleStep(2); self.sb_max_beats.setValue(8)
+        g.addWidget(QtWidgets.QLabel("Min beats"), 1,2); g.addWidget(self.sb_min_beats, 1,3)
+        g.addWidget(QtWidgets.QLabel("Max beats"), 1,4); g.addWidget(self.sb_max_beats, 1,5)
 
-    def _labeled_spin(self,parent,label,var,r,c,from_,to,increment):
-        ttk.Label(parent,text=label).grid(row=r,column=c,sticky="w")
-        s=ttk.Spinbox(parent,textvariable=var,from_=from_,to=to,increment=increment,width=8)
-        s.grid(row=r,column=c+1,sticky="w",padx=(6,18))
-        return s
+        self.ds_beat_mode = QtWidgets.QDoubleSpinBox(); self.ds_beat_mode.setRange(0.0,1.0); self.ds_beat_mode.setSingleStep(0.01); self.ds_beat_mode.setDecimals(2); self.ds_beat_mode.setValue(0.25)
+        g.addWidget(QtWidgets.QLabel("Beat mode (0..1, peak position)"), 2,0,1,2)
+        g.addWidget(self.ds_beat_mode, 2,2,1,4)
+        g.setColumnStretch(5,1)
+        return w
 
-    def _labeled_combo(self,parent,label,var,r,c,values,pady=(0,0)):
-        ttk.Label(parent,text=label).grid(row=r,column=c,sticky="w",pady=pady)
-        cb=ttk.Combobox(parent,textvariable=var,values=values,width=16,state="readonly")
-        cb.grid(row=r,column=c+1,sticky="w",padx=(6,18),pady=pady)
-        return cb
+    def _panel_time_fallback(self):
+        w = QtWidgets.QWidget();
+        g = QtWidgets.QGridLayout(w)
 
-    def _labeled_scale(self, parent, label, var, r, c, from_, to, resolution, colspan=1, fmt="{:.2f}"):
-        # Textlabel
-        ttk.Label(parent, text=label).grid(row=r, column=c, sticky="w")
-        # Slider
-        sc = ttk.Scale(parent, from_=from_, to=to, orient="horizontal", variable=var)
-        sc.grid(row=r, column=c+1, columnspan=colspan, sticky="we", padx=(6, 6))
-        # Zahlenlabel rechts neben dem Slider – mit zusätzlichem rechten Abstand
-        lbl = ttk.Label(parent, text="")
-        lbl.grid(row=r, column=c+1+colspan, sticky="w", padx=(0, 18))
-        # Slider-Spalte dehnbar
-        parent.columnconfigure(c+1, weight=1)
+        self.ds_min_seconds = QtWidgets.QDoubleSpinBox()
+        self.ds_min_seconds.setRange(0.10, 60.0)
+        self.ds_min_seconds.setDecimals(2)
+        self.ds_min_seconds.setSingleStep(0.10)
+        self.ds_min_seconds.setValue(2.00)
+        self.ds_min_seconds.setSuffix(" s")
 
-        def upd(*_):
-            try:
-                lbl.config(text=fmt.format(float(var.get())))
-            except Exception:
-                lbl.config(text=str(var.get()))
-        var.trace_add("write", lambda *_: upd())
-        upd()
-        return sc
+        self.ds_max_seconds = QtWidgets.QDoubleSpinBox()
+        self.ds_max_seconds.setRange(0.10, 90.0)
+        self.ds_max_seconds.setDecimals(2)
+        self.ds_max_seconds.setSingleStep(0.10)
+        self.ds_max_seconds.setValue(5.00)
+        self.ds_max_seconds.setSuffix(" s")
 
-    # ---------- FFmpeg check ----------
-    def _check_ffmpeg(self):
-        ffm,ffp=which_ffmpeg_bins()
-        if ffm and ffp: self.lbl_ffmpeg.config(text=f"FFmpeg OK ✅  (ffmpeg: {Path(ffm).name}, ffprobe: {Path(ffp).name})")
-        else: self.lbl_ffmpeg.config(text="FFmpeg/ffprobe not found ⚠️ – please install and add to PATH")
+        # gleichmäßig dehnbar
+        for sb in (self.ds_min_seconds, self.ds_max_seconds):
+            sb.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            sb.setMinimumWidth(80)
 
-    # ---------- Start/Stop ----------
+        lab_min = QtWidgets.QLabel("Min seconds")
+        lab_max = QtWidgets.QLabel("Max seconds")
+        lab_min.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        lab_max.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+
+        g.addWidget(lab_min, 0, 0)
+        g.addWidget(self.ds_min_seconds, 0, 1)
+        g.addWidget(lab_max, 0, 2)
+        g.addWidget(self.ds_max_seconds, 0, 3)
+
+        # beide Spinbox-Spalten gleich stretchen
+        for col in (1, 3):
+            g.setColumnStretch(col, 1)
+        for col in (0, 2):  # Labels schmal halten
+            g.setColumnMinimumWidth(col, 90)
+
+        # Konsistenz: min ≤ max
+        self.ds_min_seconds.valueChanged.connect(
+            lambda v: self.ds_max_seconds.setValue(max(self.ds_max_seconds.value(), v))
+        )
+        self.ds_max_seconds.valueChanged.connect(
+            lambda v: self.ds_min_seconds.setValue(min(self.ds_min_seconds.value(), v))
+        )
+
+        return w
+
+    def _panel_codecs(self):
+        w = QtWidgets.QWidget(); g = QtWidgets.QGridLayout(w)
+        self.cb_profile = QtWidgets.QComboBox(); self.cb_profile.addItems(list(RENDER_PROFILES.keys()))
+        self.cb_codec   = QtWidgets.QComboBox(); self.cb_codec.addItems(list(CODEC_PRESETS.keys()))
+        self.cb_audio   = QtWidgets.QComboBox(); self.cb_audio.addItems(["aac","libopus","libmp3lame"])
+        self.cb_preset  = QtWidgets.QComboBox()
+
+        self.ed_bitrate = QtWidgets.QLineEdit(); self.ed_bitrate.setPlaceholderText("Bitrate (e.g., 8M)")
+        self.ed_threads = QtWidgets.QLineEdit(); self.ed_threads.setPlaceholderText("Threads")
+        self.chk_preview = QtWidgets.QCheckBox("Generate Preview"); self.chk_preview.setChecked(True)
+
+        self.cb_profile.currentIndexChanged.connect(self._apply_profile)
+        self.cb_codec.currentIndexChanged.connect(self._sync_preset_choices)
+
+        g.addWidget(QtWidgets.QLabel("Hardware profile"), 0,0); g.addWidget(self.cb_profile, 0,1)
+        g.addWidget(QtWidgets.QLabel("Video codec"),      1,0); g.addWidget(self.cb_codec,   1,1)
+        g.addWidget(QtWidgets.QLabel("Audio codec"),      1,2); g.addWidget(self.cb_audio,   1,3)
+        g.addWidget(QtWidgets.QLabel("Codec Preset"),     1,4); g.addWidget(self.cb_preset,  1,5)
+
+        g.addWidget(QtWidgets.QLabel("Bitrate"),          2,0); g.addWidget(self.ed_bitrate, 2,1)
+        g.addWidget(QtWidgets.QLabel("Threads"),          2,2); g.addWidget(self.ed_threads, 2,3)
+        g.addWidget(self.chk_preview,                     3,0,1,2)
+        g.setColumnStretch(5,1)
+        return w
+
+    # ===================== Start/Stop & Prozess =====================
     def start(self):
         if self.running: return
-        args=self._build_args()
-        if not args: return
-        print("GUI> Starting:", " ".join(self._quote(a) for a in args), flush=True)
 
-        # Preview-Kandidaten vorbereiten
-        self._init_preview_candidates(self.var_output.get().strip())
+        if not self._validate_inputs(show_message=True): return
 
-        env=dict(os.environ); env.setdefault("PYTHONUNBUFFERED","1"); env.setdefault("TQDM_MININTERVAL","0.1")
-        try:
-            self.proc=subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                       text=False, bufsize=0, env=env)
-        except Exception as e:
-            messagebox.showerror("Start failed", str(e)); return
-        self.running=True; self._aborted=False; self._start_time=time.time()
-        self._reset_progress()
-        self.btn_start.config(state="disabled"); self.btn_stop.config(state="normal")
-        threading.Thread(target=self._reader_thread, daemon=True).start()
-
-    def stop(self):
-        if self.proc and self.running:
-            print("GUI> Abort requested…", flush=True)
-            self._aborted=True
-            try: self.proc.terminate()
-            except Exception: pass
-            self._reset_progress()
-            self.btn_start.config(state="normal"); self.btn_stop.config(state="disabled")
-        self.running=False
-
-    # ---------- Reader / Parser ----------
-    def _reader_thread(self):
-        try:
-            stream=self.proc.stdout
-            while True:
-                chunk=stream.read(256)
-                if not chunk: break
-                # pass-through logs
-                try: sys.stdout.buffer.write(chunk); sys.stdout.buffer.flush()
-                except Exception:
-                    try: sys.stdout.write(chunk.decode("utf-8",errors="ignore")); sys.stdout.flush()
-                    except Exception: pass
-                # parse
-                try: text=chunk.decode("utf-8",errors="ignore")
-                except Exception: text=chunk.decode(errors="ignore")
-                for ch in text:
-                    if ch=="\r":
-                        self._handle_progress_line(self._current_line, True); self._current_line=""
-                    elif ch=="\n":
-                        if not self._handle_progress_line(self._current_line, False): pass
-                        self._current_line=""
-                    else:
-                        self._current_line+=ch
-            if self._current_line.strip():
-                self._handle_progress_line(self._current_line, False)
-        finally:
-            code=self.proc.wait(); self.running=False
-            self.after(0, lambda:(self.btn_start.config(state="normal"), self.btn_stop.config(state="disabled")))
-            if self._aborted:
-                print("\n⛔ Aborted by user.\n", flush=True)
-            else:
-                def done_ui():
-                    self.pb_step.config(value=100); self.pb_total.config(value=100)
-                    self.lbl_step_pct.config(text="100%"); self.lbl_total_pct.config(text="100%")
-                    if code==0:
-                        messagebox.showinfo("Finished", f"Render complete:\n{self.var_output.get()}")
-                    else:
-                        messagebox.showerror("Failed", f"Process exited with code {code}")
-                self.after(0, done_ui)
-                print("\n✅ Done without errors.\n" if code==0 else f"\n❌ Process exited with code {code}\n", flush=True)
-
-    # ---------- Progress parsing ----------
-    def _detect_phase_from_line(self, s: str):
-        sl = s.lower()
-        if re.search(r'\bcollecting\b.*\bclips\b', sl): return "Collecting clips"
-        if "writing video" in sl: return "Writing video"
-        if "writing audio" in sl: return "Writing audio"
-        if "building video" in sl or "building audio" in sl: return "Building"
-        return None
-
-    def _phase_order_idx(self, name: str) -> int:
-        key = (name or "").strip().lower()
-        try: return self.STEP_ORDER.index(key)
-        except ValueError: return -1
-
-    def _handle_progress_line(self, line:str, from_cr:bool)->bool:
-        s=line.strip()
-        if not s: return False
-
-        phase = self._detect_phase_from_line(s)
-        if phase: self._schedule_set_phase(phase)
-
-        pct=self._extract_percent(s); frac=self._extract_fraction(s)
-        if frac and frac[1] and not self._target_total_secs: self._target_total_secs=float(frac[1])
-
-        handled=False
-        if pct is not None or frac is not None:
-            self._schedule_progress_update(pct, frac); handled=True
-
-        if "time=" in s:
-            m=self.RE_TIME.search(s)
-            if m:
-                hh,mm,ss=int(m.group(1)),int(m.group(2)),float(m.group(3))
-                cur=hh*3600+mm*60+ss
-                if self._target_total_secs and self._target_total_secs>0:
-                    pct_ff=max(0.0,min(100.0,100.0*cur/self._target_total_secs))
-                    self._schedule_set_phase("Writing video")
-                    self._schedule_progress_update(pct_ff, None)
-                    handled=True
-        return handled and from_cr
-
-    def _extract_percent(self,s:str):
-        m=self.RE_PCT.search(s)
-        if not m: return None
-        try: return float(m.group(1))
-        except Exception: return None
-
-    def _extract_fraction(self,s:str):
-        m=self.RE_FRAC.search(s)
-        if not m: return None
-        try: return (float(m.group(1)), float(m.group(2)))
-        except Exception: return None
-
-    # ---------- Thread-safe UI scheduling ----------
-    def _schedule_progress_update(self,pct=None,frac=None): self.after(0, lambda:self._update_progress(pct,frac))
-    def _schedule_set_phase(self,name:str): self.after(0, lambda:self._set_phase(name))
-
-    # ---------- Progress / times ----------
-    def _reset_progress(self):
-        for pb,label in ((self.pb_step,self.lbl_step_pct),(self.pb_total,self.lbl_total_pct)):
-            pb.config(maximum=100,value=0); label.config(text="0%")
-        self._phase="—"; self._phase_idx=-1; self.var_step.set("—")
-        self.lbl_elapsed.config(text="Elapsed: —"); self.lbl_eta.config(text="ETA: —")
-        self._current_line=""; self._last_step_pct=None; self._last_frac=(None,None)
-        self._target_total_secs=None; self._overall_progress=0.0
-        # Preview bleibt stehen
-
-    def _set_phase(self,name:str):
-        new_idx = self._phase_order_idx(name)
-        if new_idx < 0: return
-        if self._phase_idx != -1 and new_idx < self._phase_idx:
+        args = self._build_args()
+        if not args:
+            QtWidgets.QMessageBox.warning(self, "Missing input", "Bitte Audio/Video/Output prüfen.")
             return
-        if new_idx == self._phase_idx:
-            self._phase=name; self.var_step.set(name); return
 
-        prev_key = (self._phase or "").strip().lower()
-        if prev_key in self.STEP_WEIGHTS:
-            a,b = self.STEP_WEIGHTS[prev_key]
-            self._overall_progress = max(self._overall_progress, b*100.0)
+        cli, is_exe = _find_cli_candidate()
+        if cli is None:
+            QtWidgets.QMessageBox.critical(self, "Not found",
+                                           "pmveaver.exe / pmveaver.py wurde nicht gefunden.\nLege es neben diese GUI.")
+            return
 
-        self._phase=name; self._phase_idx=new_idx; self.var_step.set(name)
-        self._last_step_pct=None
-        self.pb_step.config(value=0); self.lbl_step_pct.config(text="0%")
+        self.proc = QtCore.QProcess(self)
+        self.proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
 
-        key = (name or "").strip().lower()
-        if key in self.STEP_WEIGHTS:
-            a,_ = self.STEP_WEIGHTS[key]
-            self._overall_progress = max(self._overall_progress, a*100.0)
-            self.pb_total.config(value=self._overall_progress)
-            self.lbl_total_pct.config(text=f"{self._overall_progress:5.1f}%")
+        # Environment
+        env = QtCore.QProcessEnvironment.systemEnvironment()
+        if not env.contains("PYTHONUNBUFFERED"): env.insert("PYTHONUNBUFFERED", "1")
+        if not env.contains("TQDM_MININTERVAL"): env.insert("TQDM_MININTERVAL", "0.1")
+        self.proc.setProcessEnvironment(env)
 
-    def _overall_from_step_pct(self, step_pct: float, phase_name: str) -> float:
-        key = (phase_name or "").strip().lower()
-        if key in self.STEP_WEIGHTS:
-            a,b = self.STEP_WEIGHTS[key]
-            r = max(0.0, min(1.0, (step_pct or 0.0)/100.0))
-            val = (a + r*(b-a)) * 100.0
-            return max(self._overall_progress, max(a*100.0, min(val, b*100.0)))
-        return max(self._overall_progress, max(0.0, min(100.0, float(step_pct or 0.0))))
-
-    def _update_progress(self,pct=None,frac=None):
-        if pct is None and frac and frac[1]:
-            try: pct=100.0*frac[0]/frac[1]
-            except Exception: pct=None
-        if pct is None: return
-        pct=max(0.0,min(100.0,float(pct)))
-        self._last_step_pct=pct
-        if frac: self._last_frac=frac
-
-        self.pb_step.config(value=pct); self.lbl_step_pct.config(text=f"{pct:5.1f}%")
-        overall = self._overall_from_step_pct(pct, self._phase)
-        self._overall_progress = max(self._overall_progress, overall)
-        self.pb_total.config(value=self._overall_progress)
-        self.lbl_total_pct.config(text=f"{self._overall_progress:5.1f}%")
-        self._refresh_time_labels()
-
-    def _refresh_time_labels(self):
-        if self._start_time is None: return
-        elapsed=time.time()-self._start_time
-        self.lbl_elapsed.config(text=f"Elapsed: {hms(elapsed)}")
-        pct_total = self._overall_progress
-        if pct_total and pct_total>0.1:
-            eta=elapsed*(100.0-pct_total)/pct_total
-            self.lbl_eta.config(text=f"ETA: {hms(eta)}")
-        else:
-            self.lbl_eta.config(text="ETA: —")
-
-    def _tick(self):
-        if self.running: self._refresh_time_labels()
-        self.after(200, self._tick)
-
-    # ---------- Preview ----------
-    def _compute_preview_candidates(self, output_path: str):
-        try:
-            p = Path(output_path)
-            stem = p.stem
-            folder = p.parent
-            return [
-                folder / f"{stem}.preview.jpg",
-                folder / f"{stem}.preview.jpeg",
-                folder / f"{stem}.preview.png",
-            ]
-        except Exception:
-            return []
-
-    def _init_preview_candidates(self, out: str):
-        out = _norm(out or "")
-        self._preview_candidates = self._compute_preview_candidates(out) if out else []
-        self._preview_path = None
-        self._preview_mtime = None
-        self._preview_tkimg = None
-
-    def _preview_tick(self):
-        try:
-            if not self.running or not _PIL_OK: return
-            if not self._preview_candidates: return
-            chosen = next((c for c in self._preview_candidates if c.exists()), None)
-            if chosen is None: return
-            if (self._preview_path is None) or (str(chosen) != self._preview_path):
-                self._preview_path = str(chosen); self._preview_mtime = None
-            mt = chosen.stat().st_mtime
-            if self._preview_mtime is None or mt > self._preview_mtime:
-                self._preview_mtime = mt
-                self._load_preview_image(chosen)
-        except Exception:
-            pass
-        finally:
-            self.after(300, self._preview_tick)
-
-    def _load_preview_image(self, path: Path):
-        try:
-            with open(path, "rb") as f:
-                data = f.read()
-            im = Image.open(io.BytesIO(data)); im.load()
-            # Höhe 100, Max-Breite 180
-            if im.height > 0:
-                ratio_h = self._preview_target_h / float(im.height)
-                w_h = int(round(im.width * ratio_h)); h_h = self._preview_target_h
-                if w_h > self._preview_max_w:
-                    ratio_w = self._preview_max_w / float(w_h)
-                    new_w = max(1, int(round(w_h * ratio_w)))
-                    new_h = max(1, int(round(h_h * ratio_w)))
-                else:
-                    new_w, new_h = max(1, w_h), max(1, h_h)
-                im = im.resize((new_w, new_h), Image.LANCZOS)
-            self._preview_tkimg = ImageTk.PhotoImage(im)
-            self.lbl_preview.config(image=self._preview_tkimg)
-        except Exception:
-            self.lbl_preview.config(image="")
-            self._preview_tkimg = None
-
-    # ---------- BPM UI Logic ----------
-    def _sync_bpm_ui(self):
-        detect = bool(self.var_bpm_detect.get())
-        if self.entry_bpm:
-            self.entry_bpm.config(state=("disabled" if detect else "normal"))
-
-    def _on_bpm_text_change(self):
-        txt = (self.var_bpm.get() or "").strip()
-        if txt and self.var_bpm_detect.get():
-            self.var_bpm_detect.set(False)
-        self._sync_bpm_ui()
-
-    # ---------- misc ----------
-    def _quote(self,s:str)->str:
-        if any(ch.isspace() for ch in s) or any(ch in s for ch in ('"', "'", "(", ")", "&", "!", "|", ";")):
-            return f"\"{s}\""
-        return s
-
-    # Args + Pfad-Validation
-    def _build_args(self):
-        script_path, is_exe = _find_cli_candidate()
-        if not script_path.exists():
-            messagebox.showerror("Missing script", f"Could not find {script_path.name} next to the GUI."); return None
-
-        audio=_norm(self.var_audio.get().strip())
-        videos=_norm(self.var_videos.get().strip())
-        output=_norm(self.var_output.get().strip())
-
-        if not audio:
-            messagebox.showerror("Missing path","Please choose an audio file."); return None
-        if not Path(audio).is_file():
-            messagebox.showerror("Invalid audio","Selected audio file does not exist."); return None
-
-        if not videos:
-            messagebox.showerror("Missing folder","Please choose the video folder."); return None
-        if not Path(videos).is_dir():
-            messagebox.showerror("Invalid folder","Selected video folder does not exist."); return None
-
-        if not output:
-            messagebox.showerror("Missing output","Please choose an output file."); return None
-        parent = Path(output).parent
-        if not parent.exists():
-            messagebox.showerror("Invalid output","Output folder does not exist."); return None
-        try:
-            if not os.access(parent, os.W_OK):
-                messagebox.showerror("No permission","Output folder is not writable."); return None
-        except Exception:
-            pass
+        # Signale
+        self.proc.readyReadStandardOutput.connect(self._on_ready_read)
+        self.proc.finished.connect(self._on_finished)
 
         if is_exe:
-            args=[str(script_path), "--audio", audio, "--videos", videos, "--output", output]
+            program = cli
+            full_args = args
         else:
-            args=[sys.executable or "python", str(script_path), "--audio", audio, "--videos", videos, "--output", output]
+            program = sys.executable
+            full_args = [cli] + args
 
-        if self.var_width.get().strip():   args+=["--width", self.var_width.get().strip()]
-        if self.var_height.get().strip():  args+=["--height", self.var_height.get().strip()]
-        if self.var_fps.get().strip():     args+=["--fps", self.var_fps.get().strip()]
+        self.proc.start(program, full_args)
+        if not self.proc.waitForStarted(5000):
+            QtWidgets.QMessageBox.critical(self, "Error", "Failed to start process.")
+            self.proc = None
+            return
 
-        args+=["--bg-volume", f"{self.var_bg_vol.get():.3f}",
-               "--clip-volume", f"{self.var_clip_vol.get():.3f}",
-               "--clip-reverb", f"{self.var_clip_reverb.get():.3f}"]
+        print("GUI> Starting:", " ".join(self._quote(a) for a in ([program] + full_args)), flush=True)
 
-        # BPM-Args exklusiv
-        if self.var_bpm_detect.get():
-            args+=["--bpm-detect"]
-        elif self.var_bpm.get().strip():
-            args+=["--bpm", self.var_bpm.get().strip()]
+        # UI-Status
+        self._reset_progress()
+        self.running = True
+        self._aborted = False
+        self._start_time = time.time()
+        self.btn_start.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        self._set_phase("Started")
 
-        args+=["--min-beats", str(self.var_min_beats.get()),
-               "--max-beats", str(self.var_max_beats.get()),
-               "--beat-mode", f"{self.var_beat_mode.get():.3f}"]
+    def stop(self):
+        if not (self.proc and self.running):
+            return
+        self._aborted = True
+        self._set_phase("Aborting")
 
-        if self.var_min_seconds.get().strip(): args+=["--min-seconds", self.var_min_seconds.get().strip()]
-        if self.var_max_seconds.get().strip(): args+=["--max-seconds", self.var_max_seconds.get().strip()]
-        if self.var_codec.get().strip():       args+=["--codec", self.var_codec.get().strip()]
-        if self.var_audio_codec.get().strip(): args+=["--audio-codec", self.var_audio_codec.get().strip()]
-        if self.var_preset.get().strip():      args+=["--preset", self.var_preset.get().strip()]
-        if self.var_bitrate.get().strip():     args+=["--bitrate", self.var_bitrate.get().strip()]
-        if self.var_threads.get().strip():     args+=["--threads", self.var_threads.get().strip()]
-        return args
+        print("GUI> Abort requested…", flush=True)
 
-    # ---------- File pickers ----------
+        # Phase A: höflich bitten (Token über STDIN)
+        try:
+            self.proc.write(b"__PMVEAVER_EXIT__\n")
+            self.proc.flush()
+        except Exception:
+            pass
+
+        # In 3s prüfen – wenn noch läuft: terminate()
+        QtCore.QTimer.singleShot(3000, self._try_terminate_then_kill)
+
+    def _try_terminate_then_kill(self):
+        if not self.proc:
+            return
+        if self.proc.state() == QtCore.QProcess.NotRunning:
+            return  # already done → finished-Signal räumt UI auf
+        # Phase B: terminate (liefert Signal / WM_CLOSE)
+        self.proc.terminate()
+
+        # In weiteren 3s prüfen – wenn immer noch läuft: kill()
+        QtCore.QTimer.singleShot(3000, self._force_kill)
+
+    def _force_kill(self):
+        if not self.proc:
+            return
+        if self.proc.state() != QtCore.QProcess.NotRunning:
+            print("GUI> Forcing kill…", flush=True)
+            self.proc.kill()
+
+    def _on_ready_read(self):
+        if not self.proc:
+            return
+        data = bytes(self.proc.readAllStandardOutput())
+        if not data:
+            return
+        try:
+            text = data.decode("utf-8", errors="ignore")
+        except Exception:
+            text = data.decode(errors="ignore")
+        for ch in text:
+            if ch in ("\n", "\r"):
+                if self._current_line:
+                    self._handle_cli_line(self._current_line)
+                    self._current_line = ""
+            else:
+                self._current_line += ch
+
+        # pass-through log
+        try:
+            sys.stdout.write(text); sys.stdout.flush()
+        except Exception:
+            pass
+
+    def _on_finished(self, exit_code: int, status: QtCore.QProcess.ExitStatus):
+        if self._aborted:
+            self._set_phase("Aborted")
+        else:
+            if status == QtCore.QProcess.NormalExit and exit_code == 0:
+                self._set_phase("Finished")
+                self._update_progress(pct=100)  # jetzt ist 100% korrekt
+            else:
+                self._set_phase(f"Failed (exit {exit_code})")
+
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        self.running = False
+        self.proc = None
+
+    # ===================== Parser / Fortschritt =====================
+    def _handle_cli_line(self, line: str):
+        s = line.strip()
+        if not s:
+            return
+
+        if "Finished" in line or "All done" in line:
+            if not self._aborted:
+                self._set_phase("Finished")
+                self._update_progress(pct=100)
+            return
+
+        if self._aborted:
+            return
+
+        phase_title = self._phase_from_line(s)
+        if phase_title:
+            self._set_phase(phase_title)
+
+        if self._is_tqdm_line(s):
+            if self._phase not in STEP_WEIGHTS:
+                self._set_phase("Writing video")
+            self._parse_tqdm_progress(s)
+
+    def _phase_from_line(self, s: str) -> str | None:
+        sl = s.lower()
+
+        # 1) Direkte CLI-Logs
+        if sl.startswith("collecting clips") or "collecting clips:" in sl:
+            return "Collecting clips"
+
+        # 2) MoviePy-/Moviepy-Logs
+        #    (verschiedene Schreibweisen je nach Version)
+        if "moviepy" in sl or "moviepy" in s:  # tolerant
+            if "building video" in sl:
+                return "Building video"
+            if "writing audio" in sl:
+                return "Writing audio"
+            if "writing video" in sl:
+                return "Writing video"
+
+        # 3) ffmpeg-typische oder neutrale Zeilen, die auf den Render-Schritt deuten
+        if "writing video" in sl:
+            return "Writing video"
+
+        return None
+
+    def _is_tqdm_line(self, s: str) -> bool:
+        # sehr tolerant: Prozent + Balken + Klammerblock
+        return ("%|" in s) and ("[" in s and "]" in s)
+
+    def _parse_tqdm_progress(self, text: str):
+        # Prozent: " 14%|"
+        m = re.search(r"(\d+)%\|", text)
+        if m:
+            pct = int(m.group(1))
+            # clamp 0..100, falls tqdm mal "101%|" spuckt
+            pct = max(0, min(100, pct))
+            self._update_progress(pct=pct)
+
+        # Zeiten: [elapsed<eta, ...] (mm:ss oder hh:mm:ss)
+        m2 = re.search(
+            r"\[(?P<elapsed>\d{1,2}:\d{2}(?::\d{2})?)(?:<(?P<eta>\d{1,2}:\d{2}(?::\d{2})?))?",
+            text
+        )
+        if m2:
+            self.lbl_elapsed_step.setText(f"Elapsed (Current step): {m2.group('elapsed')}")
+            eta = m2.group('eta') or "—"
+            self.lbl_eta_step.setText(f"ETA (Current step): {eta}")
+
+    def _set_phase(self, name: str):
+        key = name.lower()
+
+        if key == self._phase:
+            return
+
+        self._phase = key
+        self.lbl_step.setText(name)
+        self.lbl_step.setStyleSheet("")
+        if key.startswith("finished"):
+            self.lbl_step.setStyleSheet("color: #2aa52a;")
+        elif key.startswith("aborted") or key.startswith("failed"):
+            self.lbl_step.setStyleSheet("color: #d12f2f;")
+
+        # Step-Reset (nur Step, nicht Total)
+        self._last_step_pct = 0
+        self.pb_step.setValue(0)
+        self.lbl_elapsed_step.setText("Elapsed (Current step): —")
+        self.lbl_eta_step.setText("ETA (Current step): —")
+
+    def _reset_progress(self):
+        self._overall_progress = 0.0
+        self._last_step_pct = None
+        self._start_time = None
+        self.pb_step.setValue(0)
+        self.pb_total.setValue(0)
+        self.lbl_elapsed_step.setText("Elapsed (Current step): —")
+        self.lbl_eta_step.setText("ETA (Current step): —")
+        self.lbl_elapsed_total.setText("Elapsed (Total): —")
+
+        self._last_preview_check = 0.0
+        self._preview_pix = None
+        self.lbl_preview.setPixmap(QtGui.QPixmap())
+        self.lbl_preview.setText("No preview")
+
+    def _update_progress(self, pct=None, frac=None):
+        if pct is None and frac is None:
+            return
+        if frac is not None:
+            a, b = frac
+            if a and b:
+                pct = max(0.0, min(100.0, 100.0 * a / b))
+        if pct is None:
+            return
+
+        self._last_step_pct = pct
+        self.pb_step.setValue(int(pct))
+
+        # in Gesamtfortschritt mappen per STEP_WEIGHTS
+        start, end = STEP_WEIGHTS.get(self._phase, (0.0, 1.0))
+        total = start*100.0 + (end-start)*pct
+        total = max(0.0, min(100.0, total))
+        self._overall_progress = total
+        self.pb_total.setValue(int(total))
+
+        if self.chk_preview.isChecked():
+            now = time.time()
+            # alle 1.0 s oder wenn wir ~fertig sind → neu laden
+            if (now - self._last_preview_check) > 1.0 or (pct is not None and float(pct) >= 99.0):
+                self._try_load_preview(force=True)
+                self._last_preview_check = now
+
+    def _tick(self):
+        # Nur Gesamtzeit seit Start anzeigen
+        if self.running:
+            if self._start_time is None:
+                self._start_time = time.time()
+            elapsed = time.time() - self._start_time
+            self.lbl_elapsed_total.setText(f"Elapsed (Total): {hms(elapsed)}")
+
+        # Preview-Check
+        self._try_load_preview()
+
+    def _try_load_preview(self, force=False):
+        out = _norm(self.ed_output.text().strip())
+        if not out or out in (".", "./", ".\\"):
+            return
+
+        p = Path(out)
+        if p.is_dir():
+            return
+
+        preview = p.with_suffix("")  # "output"
+        preview = preview.parent / f"{preview.name}.preview.jpg"
+
+        if not preview.exists():
+            if force:
+                self._preview_pix = None
+                self.lbl_preview.setPixmap(QtGui.QPixmap())
+                self.lbl_preview.setText("No preview")
+            return
+
+        reader = QtGui.QImageReader(str(preview))
+        img = reader.read()
+        if img.isNull():
+            print(f"Preview load failed for {preview}: {reader.errorString()}")
+            return
+
+        self._preview_pix = QtGui.QPixmap.fromImage(img)
+        self.lbl_preview.setText("")
+        self._apply_preview_pixmap()
+
+    # ===================== Helfer =====================
+    def _sync_bpm_ui(self):
+        detect = self.chk_bpm.isChecked()
+        self.ed_bpm.setEnabled(not detect)
+
+    def _apply_profile(self):
+        prof = self.cb_profile.currentText()
+        cfg = RENDER_PROFILES.get(prof, {})
+        if "codec" in cfg:
+            idx = self.cb_codec.findText(cfg["codec"])
+            if idx >= 0:
+                self.cb_codec.setCurrentIndex(idx)
+        if "bitrate" in cfg:
+            self.ed_bitrate.setText(cfg["bitrate"])
+        if "threads" in cfg:
+            self.ed_threads.setText(cfg["threads"])
+        if "preset" in cfg:
+            # preset wird nach _sync_preset_choices gesetzt
+            pass
+
+    def _sync_preset_choices(self):
+        codec = self.cb_codec.currentText()
+        presets = CODEC_PRESETS.get(codec, [])
+        self.cb_preset.clear()
+        if presets:
+            self.cb_preset.addItems(presets)
+            default = DEFAULT_PRESET_BY_CODEC.get(codec, presets[0])
+            idx = self.cb_preset.findText(default)
+            self.cb_preset.setCurrentIndex(idx if idx >= 0 else 0)
+            self.cb_preset.setEnabled(True)
+        else:
+            self.cb_preset.setEnabled(False)
+
     def _browse_audio(self):
-        f=filedialog.askopenfilename(title="Select audio",
-            filetypes=[("Audio","*.mp3 *.wav *.flac *.m4a"),("All files","*.*")])
+        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select audio", "",
+                                                     "Audio (*.mp3 *.wav *.flac *.m4a);;All files (*.*)")
         if f:
-            f=_norm(f); self.var_audio.set(f)
-            if not self.var_output.get():
-                self.var_output.set(_norm(os.path.splitext(f)[0]+".mp4"))
+            self.ed_audio.setText(_norm(f))
+            self._autofill_output_from_audio()
+
+        self._validate_inputs(False)
 
     def _browse_videos(self):
-        current = self.var_videos.get()
-        if not current or not os.path.isdir(current):
-            default_videos = os.path.join(os.getcwd())
-            if os.path.isdir(default_videos):
-                current = default_videos
-            else:
-                current = os.getcwd()
-
-        d = filedialog.askdirectory(
-            title="Select video folder",
-            initialdir=current
-        )
+        start_dir = _norm(self.ed_videos.text().strip()) or _norm(os.getcwd())
+        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select video folder", start_dir)
         if d:
-            self.var_videos.set(_norm(d))
+            self.ed_videos.setText(_norm(d))
+
+        self._validate_inputs(False)
 
     def _browse_output(self):
-        f=filedialog.asksaveasfilename(title="Select output", defaultextension=".mp4",
-            filetypes=[("MP4","*.mp4"),("All files","*.*")])
-        if f: self.var_output.set(_norm(f))
+        f, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Select output", "",
+                                                     "MP4 (*.mp4);;All files (*.*)")
+        if f: self.ed_output.setText(_norm(f))
+
+        self._validate_inputs(False)
+
+    def _build_args(self) -> list[str]:
+        audio = _norm(self.ed_audio.text())
+        videos = _norm(self.ed_videos.text())
+        output = _norm(self.ed_output.text())
+        if not (audio and videos and output):
+            return []
+
+        args = [
+            "--audio", audio,
+            "--videos", videos,
+            "--output", output,
+            "--width", str(self.sb_w.value()),
+            "--height", str(self.sb_h.value()),
+            "--fps", str(self.sb_fps.value()),
+            "--bg-volume", f"{self.sl_bg.value() / 100.0:.2f}",
+            "--clip-volume", f"{self.sl_clip.value() / 100.0:.2f}",
+            "--clip-reverb", f"{self.sl_rev.value() / 100.0:.2f}",
+            "--min-seconds", f"{self.ds_min_seconds.value():.2f}",
+            "--max-seconds", f"{self.ds_max_seconds.value():.2f}",
+            "--codec", self.cb_codec.currentText(),
+            "--audio-codec", self.cb_audio.currentText(),
+        ]
+
+        if self.cb_preset.isEnabled() and self.cb_preset.currentText():
+            args += ["--preset", self.cb_preset.currentText()]
+        if self.ed_bitrate.text().strip():
+            args += ["--bitrate", self.ed_bitrate.text().strip()]
+        if self.ed_threads.text().strip():
+            args += ["--threads", self.ed_threads.text().strip()]
+
+        # BPM-Handling
+        if self.chk_bpm.isChecked():
+            args += ["--bpm-detect"]
+        else:
+            if self.ed_bpm.text().strip():
+                args += ["--bpm", self.ed_bpm.text().strip()]
+            args += [
+                "--min-beats", str(self.sb_min_beats.value()),
+                "--max-beats", str(self.sb_max_beats.value()),
+                "--beat-mode", f"{self.ds_beat_mode.value():.2f}"
+            ]
+
+        # Preview explizit mit true/false
+        args += ["--preview", "true" if self.chk_preview.isChecked() else "false"]
+
+        return args
+
+    def _autofill_video_folder(self):
+        """
+        Versucht sinnvolle Standard-Ordner für Videos zu finden
+        und setzt self.ed_videos auf den ersten Treffer.
+        """
+        names = ["videos", "clips", "input", "inputs", "source", "sources", "footage"]
+
+        # Kandidaten-Basen: aktuelles Arbeitsverzeichnis + Ordner der App
+        bases = []
+        try:
+            bases.append(Path(os.getcwd()))
+        except Exception:
+            pass
+        try:
+            bases.append(_base_dir())
+        except Exception:
+            pass
+
+        seen = set()
+        for base in bases:
+            if not base or not base.exists():
+                continue
+            for name in names:
+                p = (base / name).resolve()
+                if p in seen:
+                    continue
+                seen.add(p)
+                if p.exists() and p.is_dir():
+                    self.ed_videos.setText(str(p))
+                    return
+
+    def _autofill_output_from_audio(self):
+        """
+        Falls ein Audiofile gesetzt ist, Output automatisch auf
+        denselben Namen mit .mp4 im selben Ordner stellen,
+        wenn Output noch leer ist oder gerade überschrieben werden soll.
+        """
+        audio = _norm(self.ed_audio.text().strip())
+        if not audio:
+            return
+
+        p = Path(audio)
+        if p.exists() and p.is_file():
+            candidate = p.with_suffix(".mp4")
+            # Nur setzen, wenn das Output-Feld leer ist oder noch Standard enthält
+            if not self.ed_output.text().strip():
+                self.ed_output.setText(str(candidate))
+
+    @staticmethod
+    def _quote(s: str) -> str:
+        return f"\"{s}\"" if " " in s else s
+
+    @staticmethod
+    def _which_ffmpeg_bins():
+        """Suche ffmpeg/ffprobe in PATH, ansonsten neben der EXE/GUI."""
+        ffm, ffp = shutil.which("ffmpeg"), shutil.which("ffprobe")
+        if not ffm or not ffp:
+            base = _base_dir()
+            cand_ffm = base / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+            cand_ffp = base / ("ffprobe.exe" if os.name == "nt" else "ffprobe")
+            if cand_ffm.exists(): ffm = str(cand_ffm)
+            if cand_ffp.exists(): ffp = str(cand_ffp)
+        return ffm, ffp
+
+    def _check_ffmpeg(self):
+        ffm,ffp=self._which_ffmpeg_bins()
+        if ffm and ffp:
+            self.lbl_ffmpeg.setText(f"FFmpeg OK ✅  (ffmpeg: {Path(ffm).name}, ffprobe: {Path(ffp).name})")
+            self.lbl_ffmpeg.setStyleSheet("color: #2aa52a;")
+        else:
+            self.lbl_ffmpeg.setText("FFmpeg/ffprobe not found ⚠️ – please install and / or add to PATH")
+            self.lbl_ffmpeg.setStyleSheet("color: #d12f2f;")
+
+    def eventFilter(self, obj, event):
+        if obj is self.lbl_preview and event.type() == QtCore.QEvent.Resize and self._preview_pix:
+            self._apply_preview_pixmap()
+        return super().eventFilter(obj, event)
+
+    def _apply_preview_pixmap(self):
+        # skaliert das aktuell geladene Bild passend zur Labelgröße
+        area = self.lbl_preview.size()
+        if self._preview_pix and area.width() > 0 and area.height() > 0:
+            self.lbl_preview.setPixmap(
+                self._preview_pix.scaled(area, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+            )
+
+    def _set_field_state(self, widget: QtWidgets.QLineEdit, ok: bool, tip_ok: str, tip_err: str):
+        widget.setStyleSheet(OK_CSS if ok else ERROR_CSS)
+        widget.setToolTip(tip_ok if ok else tip_err)
+
+    def _collect_inputs(self):
+        return {
+            "audio": self.ed_audio.text().strip(),  # QLineEdit für Audio-Datei
+            "video_dir": self.ed_videos.text().strip(),  # QLineEdit für Video-Ordner
+            "output": self.ed_output.text().strip(),  # QLineEdit für Ausgabedatei
+        }
+
+    def _validate_inputs(self, show_message: bool = False) -> bool:
+        inp = self._collect_inputs()
+        ok_audio = bool(inp["audio"])
+        ok_vdir = bool(inp["video_dir"])
+        ok_out = bool(inp["output"])
+
+        self._set_field_state(
+            self.ed_audio, ok_audio,
+            "Audio-Datei ist gesetzt.",
+            "Bitte eine existierende Audio-Datei wählen."
+        )
+        self._set_field_state(
+            self.ed_videos, ok_vdir,
+            "Video-Ordner ist gesetzt.",
+            "Bitte einen existierenden Video-Ordner wählen."
+        )
+        self._set_field_state(
+            self.ed_output, ok_out,
+            "Ausgabedatei ist gesetzt.",
+            "Bitte einen gültigen Ausgabepfad angeben."
+        )
+
+        all_ok = ok_audio and ok_vdir and ok_out
+
+        # Start-Button nur aktivieren, wenn alles passt
+        self.btn_start.setEnabled(all_ok and not self.running)
+
+        if show_message and not all_ok:
+            missing = []
+            if not ok_audio: missing.append("Audio-Datei")
+            if not ok_vdir:  missing.append("Video-Ordner")
+            if not ok_out:   missing.append("Ausgabedatei")
+            QtWidgets.QMessageBox.warning(
+                self, "Pflichtfelder fehlen",
+                "Bitte folgende Felder prüfen:\n• " + "\n• ".join(missing)
+            )
+        return all_ok
+
+def resource_path(rel: str) -> str:
+    base = getattr(sys, "_MEIPASS", Path(__file__).parent)
+    return str(Path(base, rel))
+
+def main():
+    app = QtWidgets.QApplication(sys.argv)
+    app.setWindowIcon(QtGui.QIcon(resource_path("assets/icon.ico")))
+
+    w = PMVeaverQt()
+    w.show()
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
-    app=PMVeaverGUI()
-    app.mainloop()
+    main()

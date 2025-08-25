@@ -1,0 +1,178 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="256"
+   height="256"
+   viewBox="0 0 67.733332 67.733333"
+   version="1.1"
+   id="svg1"
+   inkscape:version="1.4 (86a8ad7, 2024-10-11)"
+   sodipodi:docname="icon.svg"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview1"
+     pagecolor="#505050"
+     bordercolor="#eeeeee"
+     borderopacity="1"
+     inkscape:showpageshadow="0"
+     inkscape:pageopacity="0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#505050"
+     inkscape:document-units="mm"
+     inkscape:zoom="1.0167041"
+     inkscape:cx="95.89811"
+     inkscape:cy="33.933177"
+     inkscape:window-width="1920"
+     inkscape:window-height="1009"
+     inkscape:window-x="1912"
+     inkscape:window-y="-8"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="layer1" />
+  <defs
+     id="defs1">
+    <filter
+       inkscape:collect="always"
+       style="color-interpolation-filters:sRGB"
+       id="filter8"
+       x="-0.13411869"
+       y="-0.091316724"
+       width="1.2682374"
+       height="1.1826334">
+      <feGaussianBlur
+         inkscape:collect="always"
+         stdDeviation="0.62446654"
+         id="feGaussianBlur8" />
+    </filter>
+    <filter
+       inkscape:collect="always"
+       style="color-interpolation-filters:sRGB"
+       id="filter9"
+       x="-0.11007055"
+       y="-0.091316724"
+       width="1.2201411"
+       height="1.1826334">
+      <feGaussianBlur
+         inkscape:collect="always"
+         stdDeviation="0.62446654"
+         id="feGaussianBlur9" />
+    </filter>
+    <filter
+       inkscape:collect="always"
+       style="color-interpolation-filters:sRGB"
+       id="filter10"
+       x="-0.12127878"
+       y="-0.091316724"
+       width="1.2425576"
+       height="1.1826334">
+      <feGaussianBlur
+         inkscape:collect="always"
+         stdDeviation="0.62446654"
+         id="feGaussianBlur10" />
+    </filter>
+  </defs>
+  <g
+     inkscape:label="Ebene 1"
+     inkscape:groupmode="layer"
+     id="layer1">
+    <rect
+       style="opacity:1;fill:#5d536c;stroke:#ffffff;stroke-width:0;stroke-linecap:square"
+       id="rect1"
+       width="16.722816"
+       height="37.290947"
+       x="18.473404"
+       y="-13.632593"
+       transform="matrix(0.79109137,0.611698,-0.59829117,0.80127878,0,0)" />
+    <rect
+       style="opacity:1;fill:#916f7c;stroke:#ffffff;stroke-width:0;stroke-linecap:square"
+       id="rect2"
+       width="21.989246"
+       height="47.021027"
+       x="38.441097"
+       y="-30.680458"
+       transform="matrix(0.59829117,0.80127878,-0.59829117,0.80127878,0,0)" />
+    <rect
+       style="opacity:1;fill:#7c6f91;stroke:#ffffff;stroke-width:0;stroke-linecap:square"
+       id="rect3"
+       width="16.722816"
+       height="37.290947"
+       x="59.61475"
+       y="-11.505719"
+       transform="matrix(0.79109137,0.611698,-0.59829117,0.80127878,0,0)" />
+    <text
+       xml:space="preserve"
+       style="font-weight:bold;font-size:22.0265px;font-family:Carlito;-inkscape-font-specification:'Carlito Bold';text-align:start;writing-mode:lr-tb;direction:ltr;text-anchor:start;opacity:0.2;fill:#1a1a1a;stroke:#ffffff;stroke-width:0;stroke-linecap:square;filter:url(#filter8)"
+       x="21.482939"
+       y="14.628648"
+       id="text6"
+       transform="matrix(0.80213495,0.59917164,-0.5971428,0.80062459,0,0)"><tspan
+         sodipodi:role="line"
+         id="tspan6"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-family:'Amity Jack';-inkscape-font-specification:'Amity Jack';fill:#1a1a1a;stroke-width:0"
+         x="21.482939"
+         y="14.628648">P</tspan></text>
+    <text
+       xml:space="preserve"
+       style="font-weight:bold;font-size:22.0265px;font-family:Carlito;-inkscape-font-specification:'Carlito Bold';text-align:start;writing-mode:lr-tb;direction:ltr;text-anchor:start;opacity:1;fill:#ffffff;stroke:#ffffff;stroke-width:0;stroke-linecap:square"
+       x="20.111309"
+       y="13.672319"
+       id="text3"
+       transform="matrix(0.80213495,0.59917164,-0.5971428,0.80062459,0,0)"><tspan
+         sodipodi:role="line"
+         id="tspan3"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-family:'Amity Jack';-inkscape-font-specification:'Amity Jack';fill:#ffffff;stroke-width:0"
+         x="20.111309"
+         y="13.672319">P</tspan></text>
+    <text
+       xml:space="preserve"
+       style="font-weight:bold;font-size:22.0265px;font-family:Carlito;-inkscape-font-specification:'Carlito Bold';text-align:start;writing-mode:lr-tb;direction:ltr;text-anchor:start;opacity:0.2;fill:#1a1a1a;stroke:#ffffff;stroke-width:0;stroke-linecap:square;filter:url(#filter9)"
+       x="40.804333"
+       y="16.03618"
+       id="text7"
+       transform="matrix(0.80213495,0.59917164,-0.5971428,0.80062459,0,0)"><tspan
+         sodipodi:role="line"
+         id="tspan7"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-family:'Amity Jack';-inkscape-font-specification:'Amity Jack';fill:#1a1a1a;stroke-width:0"
+         x="40.804333"
+         y="16.03618">M</tspan></text>
+    <text
+       xml:space="preserve"
+       style="font-weight:bold;font-size:22.0265px;font-family:Carlito;-inkscape-font-specification:'Carlito Bold';text-align:start;writing-mode:lr-tb;direction:ltr;text-anchor:start;opacity:1;fill:#ffffff;stroke:#ffffff;stroke-width:0;stroke-linecap:square"
+       x="39.432709"
+       y="15.079853"
+       id="text4"
+       transform="matrix(0.80213495,0.59917164,-0.5971428,0.80062459,0,0)"><tspan
+         sodipodi:role="line"
+         id="tspan4"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-family:'Amity Jack';-inkscape-font-specification:'Amity Jack';fill:#ffffff;stroke-width:0"
+         x="39.432709"
+         y="15.079853">M</tspan></text>
+    <text
+       xml:space="preserve"
+       style="font-weight:bold;font-size:22.0265px;font-family:Carlito;-inkscape-font-specification:'Carlito Bold';text-align:start;writing-mode:lr-tb;direction:ltr;text-anchor:start;opacity:0.2;fill:#1a1a1a;stroke:#ffffff;stroke-width:0;stroke-linecap:square;filter:url(#filter10)"
+       x="62.922047"
+       y="17.443714"
+       id="text8"
+       transform="matrix(0.80213495,0.59917164,-0.5971428,0.80062459,0,0)"><tspan
+         sodipodi:role="line"
+         id="tspan8"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-family:'Amity Jack';-inkscape-font-specification:'Amity Jack';fill:#1a1a1a;stroke-width:0"
+         x="62.922047"
+         y="17.443714">V</tspan></text>
+    <text
+       xml:space="preserve"
+       style="font-weight:bold;font-size:22.0265px;font-family:Carlito;-inkscape-font-specification:'Carlito Bold';text-align:start;writing-mode:lr-tb;direction:ltr;text-anchor:start;opacity:1;fill:#ffffff;stroke:#ffffff;stroke-width:0;stroke-linecap:square"
+       x="61.550423"
+       y="16.487387"
+       id="text5"
+       transform="matrix(0.80213495,0.59917164,-0.5971428,0.80062459,0,0)"><tspan
+         sodipodi:role="line"
+         id="tspan5"
+         style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-family:'Amity Jack';-inkscape-font-specification:'Amity Jack';fill:#ffffff;stroke-width:0"
+         x="61.550423"
+         y="16.487387">V</tspan></text>
+  </g>
+</svg>

@@ -44,7 +44,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['pytest','numpy.f2py.tests','torch'],
+    excludes=['pytest','numpy.f2py.tests','torch','PyQt5', 'PyQt6', 'PySide2', 'PySide'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -64,5 +64,6 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False
+    console=True,
+    icon='assets/icon.ico',
 )
