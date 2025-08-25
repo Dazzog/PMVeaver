@@ -52,6 +52,7 @@ import subprocess
 import sys
 import shutil
 import tempfile
+import atexit, signal
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -438,6 +439,8 @@ def build_montage(
     max_beats: int,
     beat_mode: float,
 ):
+    setup_tempfile_cleanup(out_path)
+
     bg_volume = max(0.0, bg_volume)
     clip_volume = max(0.0, clip_volume)
     clip_reverb = clamp(clip_reverb, 0.0, 1.0)
@@ -684,6 +687,32 @@ def build_montage(
     except Exception:
         pass
 
+def setup_tempfile_cleanup(out_path):
+    def _cleanup():
+        try:
+            # preview-Datei löschen
+            preview = out_path.parent / f"{out_path.stem}.preview.jpg"
+            if preview.exists():
+                preview.unlink()
+
+            # MoviePy-Tempfiles löschen
+            for f in out_path.parent.glob(f"{out_path.stem}TEMP_MPY_*"):
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # bei normalem Exit
+    atexit.register(_cleanup)
+
+    # bei Abbruch-Signalen
+    def _handler(signum, frame):
+        _cleanup()
+        sys.exit(1)
+    signal.signal(signal.SIGINT, _handler)
+    signal.signal(signal.SIGTERM, _handler)
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser()
