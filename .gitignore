@@ -1,0 +1,14 @@
+﻿.idea
+.venv
+.venv-build
+build
+dist
+
+*.wav
+*.mp4
+*.mp3
+*.jpg
+*.png
+
+ffmpeg.exe
+ffprobe.exe

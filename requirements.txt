@@ -1,0 +1,8 @@
+# Requirements for pmveaver.py and pmveaver_gui.py
+moviepy<2
+imageio>=2.26
+imageio-ffmpeg>=0.6.0
+tqdm>=4.66
+librosa==0.10.1
+pillow>=9
+scipy>=1.8,<2.1
