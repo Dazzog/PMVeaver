@@ -911,7 +911,40 @@ def build_montage(
             pass
 
     # Cleanup
-    montage.close()
+    try:
+        # Falls CompositeAudioClip verwendet wurde, schließen
+        try:
+            if montage.audio is not None and hasattr(montage.audio, "close"):
+                montage.audio.close()
+        except Exception:
+            pass
+
+        try:
+            if montage_with_preview is not montage and hasattr(montage_with_preview, "close"):
+                montage_with_preview.close()
+        except Exception:
+            pass
+
+        try:
+            montage.close()
+        except Exception:
+            pass
+
+        # Hintergrund-Audio explizit schließen
+        try:
+            bg_audio.close()
+        except Exception:
+            pass
+
+        # Eventuell erzeugtes Clip-Audio schließen (nass/normalisiert)
+        try:
+            if clip_audio is not None and hasattr(clip_audio, "close"):
+                clip_audio.close()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
     for seg in segments:
         try: seg.close()
         except Exception: pass
