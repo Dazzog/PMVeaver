@@ -56,6 +56,8 @@ import atexit, signal
 import math
 import threading
 import os
+import numpy as np
+import librosa
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -311,12 +313,6 @@ def make_triptych(clipA: VideoFileClip, clipB: VideoFileClip, target_w: int, tar
 # ---------------- BPM helpers ----------------
 
 def detect_bpm_with_librosa(audio_path: Path) -> float:
-    try:
-        import librosa  # type: ignore
-    except Exception:
-        raise RuntimeError(
-            "BPM auto-detect requires librosa. Install with: pip install librosa==0.10.1"
-        )
     y, sr = librosa.load(str(audio_path), sr=None, mono=True)
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
     if tempo is None or tempo <= 0:
@@ -356,6 +352,32 @@ def choose_even_beats(min_beats: int, max_beats: int, mode_pos: float = 0.25) ->
             w = (hi - b) / denom_right
         weights.append(max(w, 0.05))  # small floor so extremes never vanish
     return random.choices(evens, weights=weights, k=1)[0]
+
+def estimate_beat_offset_with_librosa(audio_path: Path, bpm_hint: Optional[float] = None) -> Tuple[float, float, float]:
+    """
+    Liefert (offset_in_s, tempo_from_librosa, confidence_like).
+    offset_in_s = Zeit bis zum ersten erkannten Beat ab t=0.
+    """
+    try:
+        import librosa  # type: ignore
+        import numpy as np  # noqa: F401
+    except Exception:
+        raise RuntimeError(
+            "Beat offset auto-detect requires librosa. Install with: pip install librosa==0.10.1"
+        )
+
+    y, sr = librosa.load(str(audio_path), sr=None, mono=True)
+    oenv = librosa.onset.onset_strength(y=y, sr=sr)
+    # Nutzt ggf. deine BPM als Start-Hinweis, nimmt aber den echten librosa-Takt
+    tempo, beat_frames = librosa.beat.beat_track(
+        y=y, sr=sr, onset_envelope=oenv, start_bpm=(bpm_hint or 120.0)
+    )
+    beat_times = librosa.frames_to_time(beat_frames, sr=sr)
+    if beat_times.size == 0:
+        # Fallback: kein Beat gefunden
+        return 0.0, float(tempo) if tempo else float(bpm_hint or 0.0), 0.0
+    strength = float(oenv[int(beat_frames[0])]) if len(beat_frames) > 0 else 0.0
+    return float(beat_times[0]), float(tempo if tempo else (bpm_hint or 0.0)), strength
 
 
 # ---------------- Audio helpers: normalize / denoise / reverb / stems ----------------
@@ -518,10 +540,24 @@ def compute_segment_bounds(src_dur: float,
                            min_beats: int, max_beats: int, beat_mode: float,
                            min_s: float, max_s: float, fps: int) -> tuple[float, float]:
     if bpm and bpm > 0:
+        # Frame-exakter Beat: erst Einzellänge runden, dann multiplizieren
+        beat_len = 60.0 / bpm
         beats = choose_even_beats(min_beats, max_beats, mode_pos=beat_mode)
-        seg_len = (60.0 / bpm) * beats
-        seg_len = round(seg_len * fps) / fps
-        return pick_segment_bounds_fixed(src_dur, seg_len)
+        seg_len = round((beat_len * beats) * fps) / fps
+
+        if src_dur + 1e-6 >= seg_len:
+            # Clip ist lang genug → normaler Pfad
+            return pick_segment_bounds_fixed(src_dur, seg_len)
+
+        # Zu kurz: auf größtes *gerades* Beat-Multiple kürzen
+        max_beats_fit = int(math.floor((src_dur + 1e-9) / beat_len))
+        even_fit = max_beats_fit - (max_beats_fit % 2)  # 7->6, 5->4, 3->2, 2->2, 1->0
+        if even_fit >= 2:
+            snapped_len = round((beat_len * even_fit) * fps) / fps
+            return pick_segment_bounds_fixed(src_dur, snapped_len)
+
+        # Weniger als 2 Beats passen → Clip verwerfen
+        return (0.0, 0.0)
     else:
         return pick_segment_bounds_random_seconds(src_dur, min_s, max_s)
 
@@ -571,6 +607,25 @@ def build_montage(
     elif bpm_detect:
         effective_bpm = detect_bpm_with_librosa(audio_path)
         print(f"PMVeaver - Detected BPM: {effective_bpm:.2f}")
+
+    # Beat-Offset ermitteln und Ziel-Dauer anpassen
+    beat_offset = 0.0
+    if effective_bpm:
+        try:
+            off, tempo_from_offset, conf = estimate_beat_offset_with_librosa(audio_path, effective_bpm)
+            # Wenn wir auto-detectet haben, übernehmen wir zur Konsistenz das gleiche Tempo
+            if bpm_detect and tempo_from_offset > 0:
+                effective_bpm = tempo_from_offset
+            beat_offset = max(0.0, float(off))
+            print(f"PMVeaver - Beat offset: {beat_offset:.3f}s")
+        except Exception as e:
+            print(f"PMVeaver - Beat offset detection failed: {e}")
+
+    # WICHTIG: Ziel-Dauer nach Offset neu setzen (sonst sammeln wir zu lange)
+    if effective_bpm and beat_offset > 0.0:
+        target_duration = max(0.0, bg_audio.duration - beat_offset)
+    else:
+        target_duration = bg_audio.duration
 
     all_files = find_video_files(videos_folder)
     if not all_files:
@@ -769,7 +824,7 @@ def build_montage(
 
     # scale volumes
     clip_audio = clip_audio.volumex(clip_volume) if clip_audio else None
-    bg_track = bg_audio.set_duration(target_duration).volumex(bg_volume)
+    bg_track = bg_audio.subclip(beat_offset).set_duration(target_duration).volumex(bg_volume)
 
     if clip_audio is not None:
         composite_audio = CompositeAudioClip([bg_track, clip_audio.set_duration(target_duration)])
