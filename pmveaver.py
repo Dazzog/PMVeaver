@@ -304,9 +304,16 @@ def letterbox(clip: VideoFileClip, target_w: int, target_h: int) -> VideoFileCli
 
 def make_triptych(clipA: VideoFileClip, clipB: VideoFileClip, target_w: int, target_h: int) -> CompositeVideoClip:
     panel_w = math.ceil(target_w / 3)
-    A_left  = cover_scale_and_crop(clipA, panel_w, target_h).set_position((0, 0))
-    B_mid   = cover_scale_and_crop(clipB, panel_w, target_h).set_position((panel_w, 0))
-    A_right = vfx.mirror_x(cover_scale_and_crop(clipA, panel_w, target_h)).set_position((2 * panel_w, 0))
+
+    B_mid = cover_scale_and_crop(clipB, panel_w, target_h).set_position((panel_w, 0))
+
+    if random.choice([True, False]):
+        A_left  = cover_scale_and_crop(clipA, panel_w, target_h).set_position((0, 0))
+        A_right = vfx.mirror_x(cover_scale_and_crop(clipA, panel_w, target_h)).set_position((2 * panel_w, 0))
+    else:
+        A_left  = vfx.mirror_x(cover_scale_and_crop(clipA, panel_w, target_h)).set_position((0, 0))
+        A_right = cover_scale_and_crop(clipA, panel_w, target_h).set_position((2 * panel_w, 0))
+
     return CompositeVideoClip([A_left, B_mid, A_right], size=(target_w, target_h))
 
 
