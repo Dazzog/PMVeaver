@@ -91,6 +91,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         self._phase = "—"
         self._overall_progress = 0.0
         self._last_preview_check = 0.0
+        self._run_output = None
 
 
         # ---------- UI ----------
@@ -513,6 +514,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self._set_phase("Started")
+        self._run_output = _norm(self.ed_output.text().strip())
 
     def stop(self):
         if not (self.proc and self.running):
@@ -581,8 +583,13 @@ class PMVeaverQt(QtWidgets.QWidget):
             if status == QtCore.QProcess.NormalExit and exit_code == 0:
                 self._set_phase("Finished")
                 self._update_progress(pct=100)  # jetzt ist 100% korrekt
+                if self._run_output and Path(self._run_output).exists():
+                    self.lbl_preview.setPixmap(QtGui.QPixmap())
+                    self.lbl_preview.setText("✅ PMV ready – click to open")
+                    self.lbl_preview.setCursor(QtCore.Qt.PointingHandCursor)
             else:
                 self._set_phase(f"Failed (exit {exit_code})")
+                self.lbl_preview.setCursor(QtCore.Qt.ArrowCursor)
 
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
@@ -693,6 +700,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         self._preview_pix = None
         self.lbl_preview.setPixmap(QtGui.QPixmap())
         self.lbl_preview.setText("No preview")
+        self._run_output = None
 
     def _update_progress(self, pct=None, frac=None):
         if pct is None and frac is None:
@@ -733,7 +741,11 @@ class PMVeaverQt(QtWidgets.QWidget):
         self._try_load_preview()
 
     def _try_load_preview(self, force=False):
-        out = _norm(self.ed_output.text().strip())
+        if self.running and self._run_output:
+            out = self._run_output
+        else:
+            out = _norm(self.ed_output.text().strip())
+
         if not out or out in (".", "./", ".\\"):
             return
 
@@ -941,6 +953,17 @@ class PMVeaverQt(QtWidgets.QWidget):
     def eventFilter(self, obj, event):
         if obj is self.lbl_preview and event.type() == QtCore.QEvent.Resize and self._preview_pix:
             self._apply_preview_pixmap()
+
+        if obj is self.lbl_preview:
+            if event.type() == QtCore.QEvent.MouseButtonPress:
+                if (event.button() == QtCore.Qt.LeftButton
+                    and not self.running
+                    and self._run_output):
+                    p = Path(self._run_output)
+                    if p.exists():
+                        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(p)))
+                        return True
+
         return super().eventFilter(obj, event)
 
     def _apply_preview_pixmap(self):
