@@ -324,7 +324,7 @@ def make_triptych(clipA: VideoFileClip, clipB: VideoFileClip, target_w: int, tar
 # ---------------- BPM helpers ----------------
 
 def detect_bpm_with_librosa(audio_path: Path) -> float:
-    y, sr = librosa.load(str(audio_path), sr=None, mono=True)
+    y, sr = librosa.load(str(audio_path), sr=22050, mono=True, duration=90.0)
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
     if tempo is None or tempo <= 0:
         raise RuntimeError("Could not detect BPM from audio.")
@@ -377,9 +377,9 @@ def estimate_beat_offset_with_librosa(audio_path: Path, bpm_hint: Optional[float
             "Beat offset auto-detect requires librosa. Install with: pip install librosa==0.10.1"
         )
 
-    y, sr = librosa.load(str(audio_path), sr=None, mono=True)
+    y, sr = librosa.load(str(audio_path), sr=22050, mono=True, duration=60.0)
     oenv = librosa.onset.onset_strength(y=y, sr=sr)
-    # Nutzt ggf. deine BPM als Start-Hinweis, nimmt aber den echten librosa-Takt
+
     tempo, beat_frames = librosa.beat.beat_track(
         y=y, sr=sr, onset_envelope=oenv, start_bpm=(bpm_hint or 120.0)
     )
