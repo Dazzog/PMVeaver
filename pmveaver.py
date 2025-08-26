@@ -439,6 +439,25 @@ def _derive_clip_audio_paths(out_path: Path) -> Tuple[Path, Path]:
     wet  = parent / f"{stem}.clips.norm_reverb.wav"
     return norm, wet
 
+class _ClipCache:
+    def __init__(self):
+        self._cache: Dict[Path, VideoFileClip] = {}
+
+    def get(self, path: Path) -> VideoFileClip:
+        clip = self._cache.get(path)
+        if clip is None:
+            # audio=True lassen, weil das Montage-Audio aus den Subclips stammt
+            clip = VideoFileClip(str(path))
+            self._cache[path] = clip
+        return clip
+
+    def close_all(self):
+        for clip in self._cache.values():
+            try:
+                clip.close()
+            except Exception:
+                pass
+        self._cache.clear()
 
 # ---------------- main build ----------------
 
@@ -467,6 +486,8 @@ def build_montage(
     preview: bool,
 ):
     setup_tempfile_cleanup(out_path)
+
+    clip_cache = _ClipCache()
 
     bg_volume = max(0.0, bg_volume)
     clip_volume = max(0.0, clip_volume)
@@ -526,7 +547,7 @@ def build_montage(
                 idx_land += 1
                 use_land_next = False
 
-                src = VideoFileClip(str(src_path))
+                src = clip_cache.get(src_path)
 
                 if not _can_read_first_frame(src):
                     src.close()
@@ -565,8 +586,8 @@ def build_montage(
                 else:
                     pathB = pathA
 
-                srcA = VideoFileClip(str(pathA))
-                srcB = VideoFileClip(str(pathB))
+                srcA = clip_cache.get(pathA)
+                srcB = clip_cache.get(pathB)
 
                 if not _can_read_first_frame(srcA) or not _can_read_first_frame(srcB):
                     srcA.close()
@@ -758,9 +779,9 @@ def build_montage(
     for seg in segments:
         try: seg.close()
         except Exception: pass
-    for src in source_clips:
-        try: src.close()
-        except Exception: pass
+
+    clip_cache.close_all()
+
     try:
         for d in temp_dirs_to_cleanup:
             shutil.rmtree(d, ignore_errors=True)
