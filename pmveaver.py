@@ -210,6 +210,19 @@ def is_portrait_from_cache(p: Path, probe_cache: Dict[Path, ProbeInfo]) -> bool:
 
 # ---------------- core helpers ----------------
 
+def open_subclip_quick(path: Path, start: float, end: float, fps: int) -> VideoFileClip:
+    clip = VideoFileClip(str(path))
+    try:
+        sub = clip.subclip(start, end).set_fps(fps)
+        # Wichtig: clip wird von MoviePy intern referenziert; wir schließen nach dem Subclip-Return.
+        # MoviePy kopiert die Reader, d.h. sub bleibt nutzbar.
+    finally:
+        try:
+            clip.close()
+        except Exception:
+            pass
+    return sub
+
 def find_video_files(folder: Path) -> List[Path]:
     return [p for p in folder.rglob("*") if p.suffix.lower() in SUPPORTED_EXTS]
 
@@ -500,6 +513,18 @@ class _ClipCache:
                 pass
         self._cache.clear()
 
+def compute_segment_bounds(src_dur: float,
+                           bpm: Optional[float],
+                           min_beats: int, max_beats: int, beat_mode: float,
+                           min_s: float, max_s: float, fps: int) -> tuple[float, float]:
+    if bpm and bpm > 0:
+        beats = choose_even_beats(min_beats, max_beats, mode_pos=beat_mode)
+        seg_len = (60.0 / bpm) * beats
+        seg_len = round(seg_len * fps) / fps
+        return pick_segment_bounds_fixed(src_dur, seg_len)
+    else:
+        return pick_segment_bounds_random_seconds(src_dur, min_s, max_s)
+
 # ---------------- main build ----------------
 
 def build_montage(
@@ -575,7 +600,6 @@ def build_montage(
     random.shuffle(landscape_files)
 
     segments: List[VideoFileClip] = []
-    source_clips: List[VideoFileClip] = []
     total = 0.0
 
     pbar = tqdm(total=target_duration, desc="Collecting clips", unit="s")
@@ -604,27 +628,22 @@ def build_montage(
                     print(f"Warning: failed to open {src_path}: {e}", file=sys.stderr)
                     continue
 
-                source_clips.append(src)
-
-                # Segment duration per mode
-                if effective_bpm and effective_bpm > 0:
-                    beats = choose_even_beats(min_beats, max_beats, mode_pos=beat_mode)
-                    seg_len = (60.0 / effective_bpm) * beats
-                    start, end = pick_segment_bounds_fixed(src.duration, seg_len)
-                else:
-                    start, end = pick_segment_bounds_random_seconds(src.duration, min_seconds, max_seconds)
+                start, end = compute_segment_bounds(
+                    src.duration, effective_bpm, min_beats, max_beats, beat_mode, min_seconds, max_seconds, fps
+                )
 
                 if end <= start:
                     src.close()
                     continue
 
-                sub = src.subclip(start, end).set_fps(fps)
+                sub = src.subclip(start, end)
                 filled = cover_scale_and_crop(sub, default_w, default_h)
                 segments.append(filled)
                 total += filled.duration
 
             else:
                 if not portrait_files:
+                    use_land_next = True
                     continue
 
                 pathA = portrait_files[idx_port % len(portrait_files)]
@@ -652,23 +671,18 @@ def build_montage(
                     print(f"Warning: failed to open portrait clip(s) {pathA} / {pathB}: {e}", file=sys.stderr)
                     continue
 
-                source_clips.extend([srcA, srcB])
-
-                if effective_bpm and effective_bpm > 0:
-                    beats = choose_even_beats(min_beats, max_beats, mode_pos=beat_mode)
-                    seg_len = (60.0 / effective_bpm) * beats
-                    sA, eA = pick_segment_bounds_fixed(srcA.duration, seg_len)
-                    sB, eB = pick_segment_bounds_fixed(srcB.duration, seg_len)
-                else:
-                    sA, eA = pick_segment_bounds_random_seconds(srcA.duration, min_seconds, max_seconds)
-                    sB, eB = pick_segment_bounds_random_seconds(srcB.duration, min_seconds, max_seconds)
+                sA, eA = compute_segment_bounds(
+                    srcA.duration, effective_bpm, min_beats, max_beats, beat_mode, min_seconds, max_seconds, fps
+                )
+                sB, eB = compute_segment_bounds(
+                    srcB.duration, effective_bpm, min_beats, max_beats, beat_mode, min_seconds, max_seconds, fps
+                )
 
                 if eA <= sA or eB <= sB:
-                    srcA.close(); srcB.close()
                     continue
 
-                subA = srcA.subclip(sA, eA).set_fps(fps)
-                subB = srcB.subclip(sB, eB).set_fps(fps)
+                subA = srcA.subclip(sA, eA)
+                subB = srcB.subclip(sB, eB)
 
                 dur = min(subA.duration, subB.duration)
                 if dur <= 0:
@@ -706,6 +720,9 @@ def build_montage(
     # ----- Audio: normalize (+ optional denoise) -> (optional reverb) -> export stems -> mix with bg -----
     clip_audio = montage.audio
     temp_dirs_to_cleanup: List[str] = []
+
+    if clip_audio is not None and (clip_volume <= 1e-6 and clip_reverb <= 1e-6):
+        clip_audio = None  # komplette Audio-Verarbeitung auslassen
 
     if clip_audio:
         # 1) Normalize + ggf. Denoise
