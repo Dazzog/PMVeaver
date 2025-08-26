@@ -1,5 +1,5 @@
 # pmveaver_gui.py
-import os, sys, re, time, shutil, subprocess, threading,signal
+import os, sys, re, time, shutil
 from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -92,6 +92,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         self._overall_progress = 0.0
         self._last_preview_check = 0.0
         self._run_output = None
+        self._suspend_validation = True
 
 
         # ---------- UI ----------
@@ -114,27 +115,31 @@ class PMVeaverQt(QtWidgets.QWidget):
         src_form = QtWidgets.QGridLayout(src_group)
 
         self.ed_audio  = QtWidgets.QLineEdit()
-        self.ed_videos = QtWidgets.QLineEdit()
-        self.ed_output = QtWidgets.QLineEdit()
         self.ed_audio.editingFinished.connect(self._autofill_output_from_audio)
-        self._autofill_video_folder()
+
+        self.ed_output = QtWidgets.QLineEdit()
+
+        src_form.addWidget(QtWidgets.QLabel("Video folders:"), 1, 0)
+        self.videos_container = QtWidgets.QWidget()
+        self.videos_layout = QtWidgets.QVBoxLayout(self.videos_container)
+        self.videos_layout.setContentsMargins(0, 0, 0, 0)
+        self.videos_layout.setSpacing(6)
+
+        self.video_rows: list[dict] = []
+        self._add_video_row()
 
         btn_audio  = QtWidgets.QPushButton("Browse…")
         btn_audio.clicked.connect(self._browse_audio)
-        btn_videos = QtWidgets.QPushButton("Browse…")
-        btn_videos.clicked.connect(self._browse_videos)
         btn_output = QtWidgets.QPushButton("Browse…")
         btn_output.clicked.connect(self._browse_output)
 
-        src_form.addWidget(QtWidgets.QLabel("Audio:"),       0, 0)
-        src_form.addWidget(self.ed_audio,                    0, 1)
-        src_form.addWidget(btn_audio,                        0, 2)
-        src_form.addWidget(QtWidgets.QLabel("Video folder:"),1, 0)
-        src_form.addWidget(self.ed_videos,                   1, 1)
-        src_form.addWidget(btn_videos,                       1, 2)
-        src_form.addWidget(QtWidgets.QLabel("Output file:"), 2, 0)
-        src_form.addWidget(self.ed_output,                   2, 1)
-        src_form.addWidget(btn_output,                       2, 2)
+        src_form.addWidget(QtWidgets.QLabel("Audio:"),        0, 0)
+        src_form.addWidget(self.ed_audio,                     0, 1)
+        src_form.addWidget(btn_audio,                         0, 2)
+        src_form.addWidget(QtWidgets.QLabel("Output file:"),  2, 0)
+        src_form.addWidget(self.ed_output,                    2, 1)
+        src_form.addWidget(btn_output,                        2, 2)
+        src_form.addWidget(self.videos_container,             1, 1, 1, 2)
         src_form.setColumnStretch(1, 1)
         root.addWidget(src_group)
 
@@ -252,7 +257,11 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         self._check_ffmpeg()
 
-        for le in (self.ed_audio, self.ed_videos, self.ed_output):
+        self._autofill_video_folder()
+
+        self._suspend_validation = False
+
+        for le in (self.ed_audio, self.ed_output):
             le.textChanged.connect(lambda _=None: self._validate_inputs(False))
 
     # ----------------- Panels -----------------
@@ -773,7 +782,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         self.lbl_preview.setText("")
         self._apply_preview_pixmap()
 
-    # ===================== Helfer =====================
+    # ===================== Helper =====================
     def _sync_bpm_ui(self):
         detect = self.chk_bpm.isChecked()
         self.ed_bpm.setEnabled(not detect)
@@ -815,13 +824,162 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         self._validate_inputs(False)
 
-    def _browse_videos(self):
-        start_dir = _norm(self.ed_videos.text().strip()) or _norm(os.getcwd())
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select video folder", start_dir)
-        if d:
-            self.ed_videos.setText(_norm(d))
+    def _add_video_row(self, path: str = "", weight_text: str = ""):
+        """
+        Fügt eine Zeile hinzu: [Pfad-QLineEdit][Browse…][Gewicht-QLineEdit ('1' implizit)]
+        Auto-Append: Sobald die letzte Zeile einen Pfad bekommt, wird eine neue leere Zeile erzeugt.
+        """
+        row_w = QtWidgets.QWidget()
+        h = QtWidgets.QHBoxLayout(row_w);
+        h.setContentsMargins(0, 0, 0, 0);
+        h.setSpacing(6)
 
-        self._validate_inputs(False)
+        ed_path = QtWidgets.QLineEdit()
+        ed_path.setPlaceholderText("Video-Ordner auswählen…")
+        if path: ed_path.setText(_norm(path))
+
+        btn_browse = QtWidgets.QPushButton("Browse…")
+        btn_browse.setCursor(QtCore.Qt.PointingHandCursor)
+
+        ed_weight = QtWidgets.QLineEdit()
+        ed_weight.setPlaceholderText("1")  # leere Eingabe ⇒ Gewicht = 1
+        ed_weight.setFixedWidth(60)
+        # Nur positive Integer zulassen (optional)
+        int_validator = QtGui.QIntValidator(1, 99999, self)
+        ed_weight.setValidator(int_validator)
+        if weight_text:
+            ed_weight.setText(weight_text.strip())
+
+        # Stretch so verteilen, dass Pfad schön breit ist
+        ed_path.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+
+        h.addWidget(ed_path, 1)
+        h.addWidget(QtWidgets.QLabel("Weight:"), 0)
+        h.addWidget(ed_weight, 0)
+        h.addWidget(btn_browse, 0)
+
+        # Zeilen-Objekt in Liste halten
+        row_obj = {"w": row_w, "path": ed_path, "weight": ed_weight, "btn": btn_browse}
+        self.video_rows.append(row_obj)
+        self.videos_layout.addWidget(row_w)
+
+        # Browse-Handler (für diese Zeile)
+        def _browse_this_row():
+            start_dir = _norm(ed_path.text().strip()) or _norm(os.getcwd())
+            d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select video folder", start_dir)
+            if d:
+                ed_path.setText(_norm(d))
+            self._validate_inputs(False)
+
+        btn_browse.clicked.connect(_browse_this_row)
+
+        # Auto-Append, wenn letzte Zeile befüllt wird
+        def _maybe_append_new(v: str):
+            # nur reagieren, wenn dies die *letzte* Zeile ist
+            if row_obj is self.video_rows[-1]:
+                if v.strip():
+                    # aber nur, wenn noch keine leere Abschlusszeile existiert
+                    self._add_video_row()
+            self._validate_inputs(False)
+
+        ed_path.textChanged.connect(_maybe_append_new)
+
+    def _iter_filled_video_rows(self):
+        """
+        Generator über befüllte Pfad-Zeilen (Pfad ≠ leer).
+        Liefert Tupel (path_norm, weight_int_or_1, original_weight_text)
+        """
+        for r in self.video_rows:
+            p = r["path"].text().strip()
+            if not p:
+                continue
+            p = _norm(p)
+            wt = r["weight"].text().strip()
+            w = int(wt) if wt else 1
+            yield (p, w, wt)
+
+    def _build_videos_arg(self) -> str:
+        """
+        Baut den *einen* String für --videos:
+        "DIR[:weight],DIR[:weight],..."
+        Weight wird nur angehängt, wenn != 1.
+        """
+        parts = []
+        for p, w, _wt in self._iter_filled_video_rows():
+            if w == 1:
+                parts.append(p)
+            else:
+                parts.append(f"{p}:{w}")
+        return ",".join(parts)
+
+    def _check_video_rows_valid(self) -> bool:
+        """
+        Validiert: Jeder gefüllte Pfad muss ein existierendes Verzeichnis sein.
+        Gewicht (falls angegeben) muss gültig (≥1) sein – das stellt der Validator sicher.
+        Mindestens *eine* Zeile muss gefüllt sein.
+        """
+        any_filled = False
+        for r in self.video_rows:
+            path_txt = r["path"].text().strip()
+            if not path_txt:
+                continue
+            any_filled = True
+            p = _norm(path_txt)
+            if not Path(p).is_dir():
+                return False
+            # weight leer ⇒ 1; falls gesetzt, ist es dank Validator ok
+        return any_filled
+
+    def _set_video_rows_from_guess(self, guess_path: str | None):
+        """
+        Wird beim Start/Autofill verwendet: setzt die *erste* Zeile auf guess_path,
+        wenn diese noch leer ist.
+        """
+        if not guess_path:
+            return
+        if self.video_rows and not self.video_rows[0]["path"].text().strip():
+            self.video_rows[0]["path"].setText(_norm(guess_path))
+
+    def _normalize_videos_text(self, txt: str) -> str:
+        """
+        Normalisiert die Eingabe:
+        - trimmt Leerzeichen um Kommas/Colon,
+        - entfernt leere Segmente,
+        - lässt Gewicht (falls vorhanden) unverändert.
+        Gibt einen einzigen String zurück, der direkt an --videos geht.
+        """
+        parts = []
+        for raw in txt.split(","):
+            raw = raw.strip()
+            if not raw:
+                continue
+            if ":" in raw:
+                path, weight = raw.split(":", 1)
+                path = _norm(path.strip())
+                weight = weight.strip()
+                parts.append(f"{path}:{weight}" if weight else path)  # leeres Gewicht vermeiden
+            else:
+                parts.append(_norm(raw))
+        return ",".join(parts)
+
+    def _check_video_dirs(self, txt: str) -> bool:
+        """
+        Prüft, ob jeder vor dem ':' stehende Teil ein existierendes Verzeichnis ist.
+        (Gewicht wird ignoriert, kann beliebig sein – CLI prüft Semantik.)
+        """
+        if not txt.strip():
+            return False
+        ok = True
+        for part in txt.split(","):
+            part = part.strip()
+            if not part:
+                ok = False;
+                break
+            path = part.split(":", 1)[0].strip()
+            if not path or not Path(_norm(path)).is_dir():
+                ok = False;
+                break
+        return ok
 
     def _browse_output(self):
         f, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Select output", "",
@@ -832,7 +990,7 @@ class PMVeaverQt(QtWidgets.QWidget):
 
     def _build_args(self) -> list[str]:
         audio = _norm(self.ed_audio.text())
-        videos = _norm(self.ed_videos.text())
+        videos = self._build_videos_arg()
         output = _norm(self.ed_output.text())
         if not (audio and videos and output):
             return []
@@ -879,12 +1037,10 @@ class PMVeaverQt(QtWidgets.QWidget):
 
     def _autofill_video_folder(self):
         """
-        Versucht sinnvolle Standard-Ordner für Videos zu finden
-        und setzt self.ed_videos auf den ersten Treffer.
+        Versucht sinnvolle Standard-Ordner zu finden und setzt *erste Zeile* darauf,
+        falls sie noch leer ist.
         """
         names = ["videos", "clips", "input", "inputs", "source", "sources", "footage"]
-
-        # Kandidaten-Basen: aktuelles Arbeitsverzeichnis + Ordner der App
         bases = []
         try:
             bases.append(Path(os.getcwd()))
@@ -905,7 +1061,7 @@ class PMVeaverQt(QtWidgets.QWidget):
                     continue
                 seen.add(p)
                 if p.exists() and p.is_dir():
-                    self.ed_videos.setText(str(p))
+                    self._set_video_rows_from_guess(str(p))
                     return
 
     def _autofill_output_from_audio(self):
@@ -980,16 +1136,19 @@ class PMVeaverQt(QtWidgets.QWidget):
 
     def _collect_inputs(self):
         return {
-            "audio": self.ed_audio.text().strip(),  # QLineEdit für Audio-Datei
-            "video_dir": self.ed_videos.text().strip(),  # QLineEdit für Video-Ordner
-            "output": self.ed_output.text().strip(),  # QLineEdit für Ausgabedatei
+            "audio": self.ed_audio.text().strip(),
+            "video_dir": self._build_videos_arg(),
+            "output": self.ed_output.text().strip(),
         }
 
     def _validate_inputs(self, show_message: bool = False) -> bool:
+        if self._suspend_validation:
+            return False
+
         inp = self._collect_inputs()
         ok_audio = bool(inp["audio"])
-        ok_vdir = bool(inp["video_dir"])
         ok_out = bool(inp["output"])
+        ok_vdir = self._check_video_rows_valid()
 
         self._set_field_state(
             self.ed_audio, ok_audio,
@@ -997,15 +1156,18 @@ class PMVeaverQt(QtWidgets.QWidget):
             "Bitte eine existierende Audio-Datei wählen."
         )
         self._set_field_state(
-            self.ed_videos, ok_vdir,
-            "Video-Ordner ist gesetzt.",
-            "Bitte einen existierenden Video-Ordner wählen."
-        )
-        self._set_field_state(
             self.ed_output, ok_out,
             "Ausgabedatei ist gesetzt.",
             "Bitte einen gültigen Ausgabepfad angeben."
         )
+
+        if ok_vdir:
+            self.videos_container.setStyleSheet("")
+            self.videos_container.setToolTip("Video-Ordner/Liste ist gültig.")
+        else:
+            # Leichte rote Outline als Hinweis
+            self.videos_container.setStyleSheet("QWidget { border: 1px solid #d9534f; border-radius: 4px; }")
+            self.videos_container.setToolTip("Bitte gültige(n) Ordner angeben. Leere Gewichtung bedeutet 1.")
 
         all_ok = ok_audio and ok_vdir and ok_out
 

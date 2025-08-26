@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Random Clip Montage
+# PMVeaver
 # --------------------------------------------------
 # - Landscape: center-crop to cover (no bars).
 # - Portrait: triptych A | B | (A mirrored).
@@ -14,20 +14,20 @@
 # - Automatic export of stems:
 #     <output_stem>.clips.norm.wav (normalized/denoised)
 #     <output_stem>.clips.norm_reverb.wav (normalized/denoised + reverb, only if reverb > 0)
-# - During rendering, save a preview image every 120 frames to a constant filename:
+# - During rendering, save a small preview image every 5 seconds to a constant filename:
 #     <output_stem>.preview.jpg  (overwritten repeatedly)
 #   This preview file is deleted after the video is finished.
 #
 # CLI:
 #   --audio PATH            background track (required)
-#   --videos DIR            folder with videos/gifs (required)
+#   --videos DIR            folder(s) with videos/gifs (required)
 #   --output PATH           output video file (required)
 #   --width INT             resize output (default: keep source sizes)
 #   --height INT            resize output (default: keep source sizes)
 #   --fps INT               output fps (default 30)
 #   --bg-volume FLOAT       volume multiplier for background audio (default 1.0)
 #   --clip-volume FLOAT     volume multiplier for clip audio (default 0.8)
-#   --clip-reverb FLOAT     placeholder (kept for compatibility, no-op)
+#   --clip-reverb FLOAT     multiplier for clip reverb (default 0.2)
 #   --bpm-detect            use librosa to detect BPM of --audio
 #   --min-beats INT         min beats per segment (default 2)
 #   --max-beats INT         max beats per segment (default 8)
@@ -55,11 +55,10 @@ import tempfile
 import atexit, signal
 import math
 import threading
-import os
-import numpy as np
-import librosa
+import numpy as np, time, os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set
+
 
 from moviepy.editor import (
     VideoFileClip,
@@ -68,7 +67,6 @@ from moviepy.editor import (
     CompositeVideoClip,
     CompositeAudioClip,
 )
-from moviepy.video.fx.resize import resize
 from moviepy.video.fx import all as vfx
 from tqdm import tqdm
 from PIL import Image as _PIL_Image
@@ -78,6 +76,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 SUPPORTED_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".mpg", ".gif"}
 
 PREVIEW_INTERVAL = 5.0
+
+# Global random
+_rng = random.Random()
 
 # ==== Robustness shims =======================================================
 
@@ -201,29 +202,7 @@ def build_probe_cache(files: List[Path], max_workers: Optional[int] = None) -> D
     return cache
 
 
-def is_portrait_from_cache(p: Path, probe_cache: Dict[Path, ProbeInfo]) -> bool:
-    info = probe_cache.get(p)
-    if not info:
-        # Fallback (sollte kaum passieren, wenn Cache vorher gebaut wurde)
-        info = ffprobe_video_info(p)
-        probe_cache[p] = info
-    return info.is_portrait
-
-
 # ---------------- core helpers ----------------
-
-def open_subclip_quick(path: Path, start: float, end: float, fps: int) -> VideoFileClip:
-    clip = VideoFileClip(str(path))
-    try:
-        sub = clip.subclip(start, end).set_fps(fps)
-        # Wichtig: clip wird von MoviePy intern referenziert; wir schließen nach dem Subclip-Return.
-        # MoviePy kopiert die Reader, d.h. sub bleibt nutzbar.
-    finally:
-        try:
-            clip.close()
-        except Exception:
-            pass
-    return sub
 
 def find_video_files(folder: Path) -> List[Path]:
     return [p for p in folder.rglob("*") if p.suffix.lower() in SUPPORTED_EXTS]
@@ -285,23 +264,6 @@ def cover_scale_and_crop(clip: VideoFileClip, target_w: int, target_h: int) -> V
     return vfx.crop(resized, x1=x1, y1=y1, x2=x2, y2=y2)
 
 
-def letterbox(clip: VideoFileClip, target_w: int, target_h: int) -> VideoFileClip:
-    src_w, src_h = clip.size
-    scale = min(target_w / src_w, target_h / src_h)
-    new_w, new_h = int(src_w * scale), int(src_h * scale)
-    resized = resize(clip, newsize=(new_w, new_h))
-    pad_x = (target_w - new_w) // 2
-    pad_y = (target_h - new_h) // 2
-    return vfx.margin(
-        resized,
-        left=pad_x,
-        right=target_w - new_w - pad_x,
-        top=pad_y,
-        bottom=target_h - new_h - pad_y,
-        color=(0, 0, 0),
-    )
-
-
 def make_triptych(clipA: VideoFileClip, clipB: VideoFileClip, target_w: int, target_h: int) -> CompositeVideoClip:
     panel_w = math.ceil(target_w / 3)
 
@@ -324,6 +286,8 @@ def make_triptych(clipA: VideoFileClip, clipB: VideoFileClip, target_w: int, tar
 # ---------------- BPM helpers ----------------
 
 def detect_bpm_with_librosa(audio_path: Path) -> float:
+    import librosa
+
     y, sr = librosa.load(str(audio_path), sr=22050, mono=True, duration=90.0)
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
     if tempo is None or tempo <= 0:
@@ -364,18 +328,12 @@ def choose_even_beats(min_beats: int, max_beats: int, mode_pos: float = 0.25) ->
         weights.append(max(w, 0.05))  # small floor so extremes never vanish
     return random.choices(evens, weights=weights, k=1)[0]
 
-def estimate_beat_offset_with_librosa(audio_path: Path, bpm_hint: Optional[float] = None) -> Tuple[float, float, float]:
+def estimate_beat_offset_with_librosa(audio_path: Path, bpm_hint: Optional[float] = None) -> Tuple[float, float]:
     """
-    Liefert (offset_in_s, tempo_from_librosa, confidence_like).
+    Liefert (offset_in_s, tempo_from_librosa).
     offset_in_s = Zeit bis zum ersten erkannten Beat ab t=0.
     """
-    try:
-        import librosa  # type: ignore
-        import numpy as np  # noqa: F401
-    except Exception:
-        raise RuntimeError(
-            "Beat offset auto-detect requires librosa. Install with: pip install librosa==0.10.1"
-        )
+    import librosa
 
     y, sr = librosa.load(str(audio_path), sr=22050, mono=True, duration=60.0)
     oenv = librosa.onset.onset_strength(y=y, sr=sr)
@@ -386,9 +344,8 @@ def estimate_beat_offset_with_librosa(audio_path: Path, bpm_hint: Optional[float
     beat_times = librosa.frames_to_time(beat_frames, sr=sr)
     if beat_times.size == 0:
         # Fallback: kein Beat gefunden
-        return 0.0, float(tempo) if tempo else float(bpm_hint or 0.0), 0.0
-    strength = float(oenv[int(beat_frames[0])]) if len(beat_frames) > 0 else 0.0
-    return float(beat_times[0]), float(tempo if tempo else (bpm_hint or 0.0)), strength
+        return 0.0, float(tempo) if tempo else float(bpm_hint or 0.0)
+    return float(beat_times[0]), float(tempo if tempo else (bpm_hint or 0.0))
 
 
 # ---------------- Audio helpers: normalize / denoise / reverb / stems ----------------
@@ -576,7 +533,7 @@ def compute_segment_bounds(src_dur: float,
 
 def build_montage(
     audio_path: Path,
-    videos_folder: Path,
+    videos_spec: str,
     out_path: Path,
     min_seconds: float,
     max_seconds: float,
@@ -623,7 +580,7 @@ def build_montage(
     beat_offset = 0.0
     if effective_bpm:
         try:
-            off, tempo_from_offset, conf = estimate_beat_offset_with_librosa(audio_path, effective_bpm)
+            off, tempo_from_offset = estimate_beat_offset_with_librosa(audio_path, effective_bpm)
             # Wenn wir auto-detectet haben, übernehmen wir zur Konsistenz das gleiche Tempo
             if bpm_detect and tempo_from_offset > 0:
                 effective_bpm = tempo_from_offset
@@ -638,38 +595,28 @@ def build_montage(
     else:
         target_duration = bg_audio.duration
 
-    all_files = find_video_files(videos_folder)
-    if not all_files:
+    specs = _parse_videos_spec(videos_spec)
+
+    unique_files: Set[Path] = set()
+    for folder, _w in specs:
+        unique_files.update(find_video_files(folder))
+    if not unique_files:
         raise RuntimeError("No video files found")
 
-    probe_cache = build_probe_cache(all_files)
+    print(f"PMVeaver - Found {len(list(unique_files))} video file(s) total")
 
-    # categorize by orientation (rotation-aware)
-    portrait_files: List[Path] = []
-    landscape_files: List[Path] = []
+    probe_cache = build_probe_cache(list(unique_files))
 
-    for p in all_files:
-        info = probe_cache.get(p)
-        if not info:
-            continue
-        if info.width <= 0 or info.height <= 0 or info.duration <= 0:
-            # unbrauchbare Dateien früh aussortieren
-            continue
-        if info.is_portrait:
-            portrait_files.append(p)
-        else:
-            landscape_files.append(p)
+    next_portrait = _make_epoch_picker(specs, probe_cache, "portrait")
+    next_landscape = _make_epoch_picker(specs, probe_cache, "landscape")
 
-    if not portrait_files and not landscape_files:
-        raise RuntimeError("No valid video files after probing")
+    portrait_unique_count = sum(
+        1 for p, info in probe_cache.items()
+        if info and info.is_portrait and info.width > 0 and info.height > 0 and info.duration > 0
+    )
 
-    print(f"PMVeaver - Found {len(all_files)} video file(s) total")
-    print(f"PMVeaver - Landscape clips: {len(landscape_files)}")
-    print(f"PMVeaver - Portrait clips:  {len(portrait_files)}")
-
-    # Randomize clip order every run
-    random.shuffle(portrait_files)
-    random.shuffle(landscape_files)
+    print(f"PMVeaver - Landscape clips: {len(list(unique_files)) - portrait_unique_count}")
+    print(f"PMVeaver - Portrait clips:  {portrait_unique_count}")
 
     segments: List[VideoFileClip] = []
     total = 0.0
@@ -678,22 +625,18 @@ def build_montage(
     default_w = width or 1920
     default_h = height or 1080
 
-    idx_land = 0
-    idx_port = 0
-    use_land_next = True
-
     while total < target_duration + 0.01:
         try:
-            pick_land = bool(landscape_files) and (use_land_next or not portrait_files)
-            if pick_land and landscape_files:
-                src_path = landscape_files[idx_land % len(landscape_files)]
-                idx_land += 1
-                use_land_next = False
+            choice = _rng.choice(["landscape", "portrait"])
+
+            if choice == "landscape":
+                src_path = next_landscape()
+                if src_path is None:
+                    continue
 
                 info = probe_cache.get(src_path)
                 if not info or info.width <= 0 or info.height <= 0 or info.duration <= 0:
                     continue
-
                 try:
                     src = clip_cache.get(src_path)
                 except Exception as e:
@@ -703,9 +646,7 @@ def build_montage(
                 start, end = compute_segment_bounds(
                     src.duration, effective_bpm, min_beats, max_beats, beat_mode, min_seconds, max_seconds, fps
                 )
-
                 if end <= start:
-                    src.close()
                     continue
 
                 sub = src.subclip(start, end)
@@ -713,20 +654,13 @@ def build_montage(
                 segments.append(filled)
                 total += filled.duration
 
-            else:
-                if not portrait_files:
-                    use_land_next = True
+            else:  # choice == "portrait"
+                pathA = next_portrait()
+                if (pathA is None):
                     continue
-
-                pathA = portrait_files[idx_port % len(portrait_files)]
-                idx_port += 1
-
-                if len(portrait_files) > 1:
-                    pathB = portrait_files[idx_port % len(portrait_files)]
-                    if pathB == pathA:
-                        pathB = portrait_files[(idx_port + 1) % len(portrait_files)]
-                else:
-                    pathB = pathA
+                pathB = next_portrait()
+                if pathB is None:
+                    continue
 
                 infoA = probe_cache.get(pathA)
                 infoB = probe_cache.get(pathB)
@@ -749,32 +683,29 @@ def build_montage(
                 sB, eB = compute_segment_bounds(
                     srcB.duration, effective_bpm, min_beats, max_beats, beat_mode, min_seconds, max_seconds, fps
                 )
-
                 if eA <= sA or eB <= sB:
                     continue
 
                 subA = srcA.subclip(sA, eA)
                 subB = srcB.subclip(sB, eB)
-
                 dur = min(subA.duration, subB.duration)
                 if dur <= 0:
-                    subA.close(); subB.close()
+                    subA.close();
+                    subB.close()
                     continue
 
                 subA = subA.subclip(0, dur)
                 subB = subB.subclip(0, dur)
-
                 trip = make_triptych(subA, subB, default_w, default_h)
                 segments.append(trip)
                 total += trip.duration
-                use_land_next = True
+
+            if segments:
+                pbar.update(segments[-1].duration)
 
         except Exception as e:
             print(f"Warning: building segment failed: {e}", file=sys.stderr)
             continue
-
-        if segments:
-            pbar.update(segments[-1].duration)
 
     pbar.close()
 
@@ -847,9 +778,6 @@ def build_montage(
     # --- Live preview via frame pipeline: save every 5 seconds to a constant file
     preview_path = out_path.parent / f"{out_path.stem}.preview.jpg"
 
-    from PIL import Image as _PIL_Image
-    import numpy as np, time, os
-
     last_ts = 0.0
     def _preview_writer(frame):
         nonlocal last_ts
@@ -862,8 +790,6 @@ def build_montage(
             # Ensure we have a uint8 RGB array
             if isinstance(frame, np.ndarray):
                 arr = frame
-                # If BGR (e.g. from OpenCV), swap – otherwise omit
-                # arr = arr[..., ::-1]  # only if you really have BGR
                 if arr.dtype != np.uint8:
                     arr = arr.astype(np.uint8, copy=False)
                 img = _PIL_Image.fromarray(arr)
@@ -1029,10 +955,148 @@ def start_stdin_exit_watcher(token: str = "__PMVEAVER_EXIT__"):
                 pass
     threading.Thread(target=_runner, daemon=True).start()
 
+def _parse_videos_spec(spec: str) -> List[Tuple[Path, int]]:
+    """
+    Akzeptiert entweder:
+      - einen einzelnen Ordnerpfad (Rückgabe [(Path, 1)]), oder
+      - eine Liste "dir[:w],dir[:w],..." wobei w eine ganze Zahl ≥ 1 ist.
+    Windows-Pfade mit Laufwerksbuchstaben (z. B. "C:\...") werden korrekt behandelt,
+    weil nur das *letzte* ':' als potentieller Trenner betrachtet wird.
+    """
+    # Einzelner Ordnerpfad?
+    p0 = Path(spec).expanduser()
+    if p0.is_dir():
+        out_single = [(p0, 1)]
+        print("CLI> Parsed --videos entries (single):")
+        print(f"  {p0} (weight=1)")
+        return out_single
+
+    out: List[Tuple[Path, int]] = []
+    for raw in (spec or "").split(","):
+        part = raw.strip()
+        if not part:
+            continue
+
+        # optionale Quotes entfernen, Whitespaces trimmen
+        s = part.strip().strip('"').strip("'")
+
+        # Standard: ganzes Segment ist Pfad, Gewicht = 1
+        d, w = s, 1
+
+        # Gewicht NUR erkennen, wenn der *rechte* Teil eine Ganzzahl ist
+        if ":" in s:
+            head, tail = s.rsplit(":", 1)
+            t = tail.strip()
+            if t.isdigit():
+                d, w = head, int(t)
+            else:
+                d, w = s, 1  # kein gültiges Gewicht → kompletter String ist Pfad
+
+        d_path = Path(d).expanduser()
+        if not d_path.is_dir():
+            raise ValueError(f"--videos: directory not found: {d_path}")
+        if w <= 0:
+            raise ValueError(f"--videos: weight must be >=1 in entry '{raw}'")
+
+        out.append((d_path, w))
+
+    if not out:
+        raise ValueError("--videos: no valid directories")
+
+    return out
+
+def _build_weighted_pools(
+    specs: List[Tuple[Path, int]],
+    probe_cache: Dict[Path, "ProbeInfo"],  # ProbeInfo: width,height,duration,is_portrait
+) -> Tuple[List[Path], List[Path]]:
+    """
+    Erzeugt zwei Pools (Portrait/Landscape), in denen die Dateien gemäß Ordnergewicht
+    *dupliziert* sind. Danach werden die Pools gemischt.
+    """
+    portrait_pool: List[Path] = []
+    landscape_pool: List[Path] = []
+
+    for folder, w in specs:
+        files = find_video_files(folder)  # vorhandene Helper: rekursiv + Extension-Filter
+        for p in files:
+            info = probe_cache.get(p)
+            if not info or info.width <= 0 or info.height <= 0 or info.duration <= 0:
+                continue
+            target = portrait_pool if info.is_portrait else landscape_pool
+            target.extend([p] * w)
+
+    _rng.shuffle(portrait_pool)
+    _rng.shuffle(landscape_pool)
+    return portrait_pool, landscape_pool
+
+def _make_epoch_picker(
+    specs: List[Tuple[Path, int]],
+    probe_cache: Dict[Path, "ProbeInfo"],
+    orientation: str,  # "portrait" | "landscape"
+):
+    """
+    Liefert eine Funktion next_clip() -> Optional[Path],
+    die aus einem gewichteten Pool zieht und *sämtliche Duplikate*
+    des gewählten Clips aus dem Pool entfernt. Wenn der Pool leer ist,
+    startet automatisch eine neue Epoche.
+    """
+    used: Set[Path] = set()
+
+    def _fresh_pool() -> List[Path]:
+        pool_p, pool_l = _build_weighted_pools(specs, probe_cache)
+        return pool_p if orientation == "portrait" else pool_l
+
+    pool: List[Path] = _fresh_pool()
+
+    def draw_unique_from_pool() -> Optional[Path]:
+        nonlocal pool, used
+        # bereits verwendete Clips dieser Epoche entfernen (amortisiert O(n))
+        if used:
+            pool[:] = [x for x in pool if x not in used]
+            if not pool:
+                print(f"Warning: Ran out of {orientation} clips - duplicates will be used")
+                return None
+
+        # Index ziehen
+        idx = _rng.randrange(len(pool))
+        picked = pool[idx]
+
+        # gezogenen Eintrag entfernen (swap-pop) und *alle* verbleibenden Duplikate filtern
+        pool[idx] = pool[-1]
+        pool.pop()
+        if pool:
+            pool[:] = [x for x in pool if x != picked]
+
+        used.add(picked)
+        return picked
+
+    def next_clip() -> Optional[Path]:
+        nonlocal pool, used
+        clip = draw_unique_from_pool()
+        if clip is not None:
+            return clip
+
+        # Epoche erschöpft → neue starten
+        pool = _fresh_pool()
+        used.clear()
+        # Falls es in dieser Orientierung gar keine Dateien gibt, kann der Pool leer sein
+        if not pool:
+            return None
+        return draw_unique_from_pool()
+
+    return next_clip
+
 def parse_args(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--audio", type=Path, required=True)
-    p.add_argument("--videos", type=Path, required=True)
+    p.add_argument(
+        "--videos",
+        type = str,
+        required = True,
+        help = "Ordner mit Videos. Auch mehrere mit Gewichtung möglich: "
+        '"DIR[:weight],DIR[:weight],..."  (z.B. "cats:1,dogs:2"). '
+        "Ohne ':weight' = 1. Abwärtskompatibel: einzelner Ordnerpfad bleibt gültig."
+        )
     p.add_argument("--output", type=Path, required=True)
 
     # Time-based fallback (used when no BPM is provided/detected)
@@ -1078,7 +1142,7 @@ def main(argv=None):
     start_stdin_exit_watcher("__PMVEAVER_EXIT__")
     build_montage(
         audio_path=args.audio,
-        videos_folder=args.videos,
+        videos_spec=args.videos,
         out_path=args.output,
         min_seconds=args.min_seconds,
         max_seconds=args.max_seconds,
