@@ -567,8 +567,10 @@ def build_montage(
     effective_bpm: Optional[float] = None
     if bpm is not None:
         effective_bpm = float(bpm)
+        print(f"PMVeaver - Using BPM: {effective_bpm:.2f}")
     elif bpm_detect:
         effective_bpm = detect_bpm_with_librosa(audio_path)
+        print(f"PMVeaver - Detected BPM: {effective_bpm:.2f}")
 
     all_files = find_video_files(videos_folder)
     if not all_files:
@@ -595,6 +597,10 @@ def build_montage(
     if not portrait_files and not landscape_files:
         raise RuntimeError("No valid video files after probing")
 
+    print(f"PMVeaver - Found {len(all_files)} video file(s) total")
+    print(f"PMVeaver - Landscape clips: {len(landscape_files)}")
+    print(f"PMVeaver - Portrait clips:  {len(portrait_files)}")
+
     # Randomize clip order every run
     random.shuffle(portrait_files)
     random.shuffle(landscape_files)
@@ -602,7 +608,7 @@ def build_montage(
     segments: List[VideoFileClip] = []
     total = 0.0
 
-    pbar = tqdm(total=target_duration, desc="Collecting clips", unit="s")
+    pbar = tqdm(total=target_duration, desc="PMVeaver - Collecting clips", unit="s")
     default_w = width or 1920
     default_h = height or 1080
 
