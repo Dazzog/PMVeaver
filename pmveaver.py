@@ -70,6 +70,8 @@ from moviepy.video.fx.resize import resize
 from moviepy.video.fx import all as vfx
 from tqdm import tqdm
 from PIL import Image as _PIL_Image
+from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 SUPPORTED_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".mpg", ".gif"}
 
@@ -106,65 +108,104 @@ except Exception:
 
 # ---------------- ffprobe helpers ----------------
 
-def ffprobe_streams(path: Path) -> Dict:
+@dataclass(frozen=True)
+class ProbeInfo:
+    width: int
+    height: int
+    rotation: int
+    duration: float
+
+    @property
+    def is_portrait(self) -> bool:
+        # rotation-bereinigte Orientierung ist bereits in width/height enthalten
+        return self.height > self.width
+
+def ffprobe_video_info(path: Path) -> ProbeInfo:
     exe = shutil.which("ffprobe")
     if not exe:
-        raise RuntimeError(
-            "ffprobe not found. Please install FFmpeg and ensure ffprobe is in your PATH."
-        )
+        raise RuntimeError("ffprobe not found. Please install FFmpeg and ensure ffprobe is in PATH.")
     abs_path = str(path.resolve())
+    # Wir fragen selektiv ab, um Parsing-Overhead zu sparen:
+    # - width,height,rotation (side_data_list/tags.rotate), duration (aus stream oder format)
     args = [
         exe, "-v", "error",
-        "-print_format", "json",
-        "-show_streams", "-show_format",
-        abs_path,
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height,side_data_list:stream_tags=rotate:format=duration",
+        "-of", "json",
+        abs_path
     ]
-    try:
-        res = subprocess.run(
-            args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        err = e.stderr.decode(errors="replace") if e.stderr else str(e)
-        raise RuntimeError(f"ffprobe failed for {path}: {err}") from e
-    out = res.stdout.decode("utf-8", errors="replace")
-    return json.loads(out)
+    res = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    data = json.loads(res.stdout.decode("utf-8", errors="replace"))
 
+    streams = data.get("streams", [])
+    if not streams:
+        raise RuntimeError(f"No video stream in {path}")
+    s = streams[0]
 
-def probe_video_dimensions(path: Path) -> Tuple[int, int, int]:
-    data = ffprobe_streams(path)
-    vstreams = [s for s in data.get("streams", []) if s.get("codec_type") == "video"]
-    if not vstreams:
-        raise RuntimeError(f"No video stream found in {path}")
-    s = vstreams[0]
-    width = int(s.get("width", 0) or 0)
+    width  = int(s.get("width", 0) or 0)
     height = int(s.get("height", 0) or 0)
 
     rotation = 0
-    side_data = s.get("side_data_list") or []
-    for sd in side_data:
+    # side_data_list rotation
+    sdl = s.get("side_data_list") or []
+    for sd in sdl:
         if sd.get("rotation") is not None:
-            try:
-                rotation = int(sd["rotation"])
-            except Exception:
-                rotation = 0
+            try: rotation = int(sd["rotation"])
+            except Exception: rotation = 0
             break
+    # tag rotate fallback
     if rotation == 0:
         tags = s.get("tags") or {}
         rot_tag = tags.get("rotate") or tags.get("ROTATE")
         if rot_tag is not None:
-            try:
-                rotation = int(rot_tag)
-            except Exception:
-                rotation = 0
-    rotation = rotation % 360
+            try: rotation = int(rot_tag)
+            except Exception: rotation = 0
+    rotation %= 360
     if rotation in (90, 270):
         width, height = height, width
-    return width, height, rotation
+
+    # Dauer (Format-Dauer ist zuverlässiger bei manchen Containern)
+    dur = 0.0
+    try:
+        dur_str = (data.get("format") or {}).get("duration")
+        if dur_str: dur = float(dur_str)
+    except Exception:
+        pass
+    # Fallback: aus Stream (falls vorhanden)
+    if dur <= 0:
+        try:
+            dur = float(s.get("duration") or 0.0)
+        except Exception:
+            dur = 0.0
+
+    return ProbeInfo(width=width, height=height, rotation=rotation, duration=dur)
+
+def build_probe_cache(files: List[Path], max_workers: Optional[int] = None) -> Dict[Path, ProbeInfo]:
+    cache: Dict[Path, ProbeInfo] = {}
+    if not files:
+        return cache
+    # Threaded ffprobe (IO-bound → Threads ok)
+    workers = max_workers or max(1, (os.cpu_count() or 4))
+    # Bei sehr vielen kleinen Clips kannst du workers auch auf min(16, cpu*2) deckeln
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        future_map = {ex.submit(ffprobe_video_info, p): p for p in files}
+        for fut in as_completed(future_map):
+            p = future_map[fut]
+            try:
+                cache[p] = fut.result()
+            except Exception as e:
+                # Nicht hart abbrechen – Datei einfach überspringen
+                print(f"Warning: ffprobe failed for {p}: {e}", file=sys.stderr)
+    return cache
 
 
-def is_portrait_file(path: Path) -> bool:
-    w, h, _ = probe_video_dimensions(path)
-    return h > w
+def is_portrait_from_cache(p: Path, probe_cache: Dict[Path, ProbeInfo]) -> bool:
+    info = probe_cache.get(p)
+    if not info:
+        # Fallback (sollte kaum passieren, wenn Cache vorher gebaut wurde)
+        info = ffprobe_video_info(p)
+        probe_cache[p] = info
+    return info.is_portrait
 
 
 # ---------------- core helpers ----------------
@@ -508,17 +549,23 @@ def build_montage(
     if not all_files:
         raise RuntimeError("No video files found")
 
+    probe_cache = build_probe_cache(all_files)
+
     # categorize by orientation (rotation-aware)
     portrait_files: List[Path] = []
     landscape_files: List[Path] = []
+
     for p in all_files:
-        try:
-            if is_portrait_file(p):
-                portrait_files.append(p)
-            else:
-                landscape_files.append(p)
-        except Exception as e:
-            print(f"Warning: ffprobe failed for {p}: {e}", file=sys.stderr)
+        info = probe_cache.get(p)
+        if not info:
+            continue
+        if info.width <= 0 or info.height <= 0 or info.duration <= 0:
+            # unbrauchbare Dateien früh aussortieren
+            continue
+        if info.is_portrait:
+            portrait_files.append(p)
+        else:
+            landscape_files.append(p)
 
     if not portrait_files and not landscape_files:
         raise RuntimeError("No valid video files after probing")
@@ -547,10 +594,14 @@ def build_montage(
                 idx_land += 1
                 use_land_next = False
 
-                src = clip_cache.get(src_path)
+                info = probe_cache.get(src_path)
+                if not info or info.width <= 0 or info.height <= 0 or info.duration <= 0:
+                    continue
 
-                if not _can_read_first_frame(src):
-                    src.close()
+                try:
+                    src = clip_cache.get(src_path)
+                except Exception as e:
+                    print(f"Warning: failed to open {src_path}: {e}", file=sys.stderr)
                     continue
 
                 source_clips.append(src)
@@ -586,12 +637,19 @@ def build_montage(
                 else:
                     pathB = pathA
 
-                srcA = clip_cache.get(pathA)
-                srcB = clip_cache.get(pathB)
+                infoA = probe_cache.get(pathA)
+                infoB = probe_cache.get(pathB)
+                if not infoA or not infoB:
+                    continue
+                if (infoA.width <= 0 or infoA.height <= 0 or infoA.duration <= 0 or
+                        infoB.width <= 0 or infoB.height <= 0 or infoB.duration <= 0):
+                    continue
 
-                if not _can_read_first_frame(srcA) or not _can_read_first_frame(srcB):
-                    srcA.close()
-                    srcB.close()
+                try:
+                    srcA = clip_cache.get(pathA)
+                    srcB = clip_cache.get(pathB)
+                except Exception as e:
+                    print(f"Warning: failed to open portrait clip(s) {pathA} / {pathB}: {e}", file=sys.stderr)
                     continue
 
                 source_clips.extend([srcA, srcB])
@@ -787,13 +845,6 @@ def build_montage(
             shutil.rmtree(d, ignore_errors=True)
     except Exception:
         pass
-
-def _can_read_first_frame(v: VideoFileClip) -> bool:
-    try:
-        _ = v.get_frame(0)
-        return True
-    except Exception:
-        return False
 
 def setup_tempfile_cleanup(out_path):
     def _cleanup():
