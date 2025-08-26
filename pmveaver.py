@@ -187,8 +187,8 @@ def build_probe_cache(files: List[Path], max_workers: Optional[int] = None) -> D
     if not files:
         return cache
     # Threaded ffprobe (IO-bound → Threads ok)
-    workers = max_workers or max(1, (os.cpu_count() or 4))
-    # Bei sehr vielen kleinen Clips kannst du workers auch auf min(16, cpu*2) deckeln
+    workers = max_workers or max(1, (min(16, os.cpu_count()) or 4))
+
     with ThreadPoolExecutor(max_workers=workers) as ex:
         future_map = {ex.submit(ffprobe_video_info, p): p for p in files}
         for fut in as_completed(future_map):
@@ -307,12 +307,16 @@ def make_triptych(clipA: VideoFileClip, clipB: VideoFileClip, target_w: int, tar
 
     B_mid = cover_scale_and_crop(clipB, panel_w, target_h).set_position((panel_w, 0))
 
+    A_scaled = cover_scale_and_crop(clipA, panel_w, target_h)
+    A_mirrored = A_scaled.fx(vfx.mirror_x)
+
     if random.choice([True, False]):
-        A_left  = cover_scale_and_crop(clipA, panel_w, target_h).set_position((0, 0))
-        A_right = vfx.mirror_x(cover_scale_and_crop(clipA, panel_w, target_h)).set_position((2 * panel_w, 0))
+        A_left, A_right = A_scaled, A_mirrored
     else:
-        A_left  = vfx.mirror_x(cover_scale_and_crop(clipA, panel_w, target_h)).set_position((0, 0))
-        A_right = cover_scale_and_crop(clipA, panel_w, target_h).set_position((2 * panel_w, 0))
+        A_left, A_right = A_mirrored, A_scaled
+
+    A_left = A_left.set_position((0, 0))
+    A_right = A_right.without_audio().set_position((2 * panel_w, 0))
 
     return CompositeVideoClip([A_left, B_mid, A_right], size=(target_w, target_h))
 
