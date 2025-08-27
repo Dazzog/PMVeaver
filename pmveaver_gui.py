@@ -250,10 +250,16 @@ class PMVeaverQt(QtWidgets.QWidget):
         src_form.addWidget(QtWidgets.QLabel("Audio:"),        0, 0)
         src_form.addWidget(self.ed_audio,                     0, 1)
         src_form.addWidget(btn_audio,                         0, 2)
-        src_form.addWidget(QtWidgets.QLabel("Output file:"),  2, 0)
-        src_form.addWidget(self.ed_output,                    2, 1)
-        src_form.addWidget(btn_output,                        2, 2)
+
         src_form.addWidget(self.videos_container,             1, 1, 1, 2)
+
+        self.chk_trim = QtWidgets.QCheckBox("Trim long clips")
+        src_form.addWidget(self.chk_trim, 2, 1)
+
+
+        src_form.addWidget(QtWidgets.QLabel("Output file:"),  3, 0)
+        src_form.addWidget(self.ed_output,                    3, 1)
+        src_form.addWidget(btn_output,                        3, 2)
         src_form.setColumnStretch(1, 1)
         root.addWidget(src_group)
 
@@ -367,7 +373,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         root.addLayout(btn_row)
 
         # Auto-Größe
-        self.resize(640, 840)
+        self.resize(640, 800)
 
         self._check_ffmpeg()
 
@@ -460,7 +466,7 @@ class PMVeaverQt(QtWidgets.QWidget):
             ds.setFixedWidth(72)
             return ds
 
-        self.ds_bg = dspin(0, 200, 1000)
+        self.ds_bg = dspin(0, 200, 100)
         self.ds_clip = dspin(0, 200, 80)
         self.ds_rev = dspin(0, 100, 20)
 
@@ -508,8 +514,8 @@ class PMVeaverQt(QtWidgets.QWidget):
         g.addWidget(self.ed_bpm, 1, 1)
 
         self.sb_min_beats = QtWidgets.QSpinBox()
-        self.sb_min_beats.setRange(2, 64)
-        self.sb_min_beats.setSingleStep(2)
+        self.sb_min_beats.setRange(1, 64)
+        self.sb_min_beats.setSingleStep(1)
         self.sb_min_beats.setValue(2)
 
         self.sb_max_beats = QtWidgets.QSpinBox()
@@ -1224,6 +1230,8 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         # Preview explizit mit true/false
         args += ["--preview", "true" if self.chk_preview.isChecked() else "false"]
+
+        if self.chk_trim.isChecked(): args += ["--trim-large-clips"]
 
         return args
 

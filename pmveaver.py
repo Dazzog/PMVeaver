@@ -209,22 +209,64 @@ def find_video_files(folder: Path) -> List[Path]:
 
 
 def pick_segment_bounds_random_seconds(duration: float, min_s: float, max_s: float) -> Tuple[float, float]:
-    seg_len = random.uniform(min_s, max_s)
+    # Fenster bestimmen: <120s → [0,1], sonst [0.10, 0.95]
+    lo_frac, hi_frac = (0.0, 1.0) if duration < 120.0 else (0.10, 0.95)
+
     if duration <= 0:
         return 0.0, 0.0
-    if seg_len >= duration:
-        return 0.0, duration
-    start = random.uniform(0, duration - seg_len)
-    return start, start + seg_len
 
+    seg_len = random.uniform(min_s, max_s)
+    # Versuchen, komplett im Fenster zu bleiben
+    s, e = _choose_start_in_window(duration, seg_len, lo_frac, hi_frac)
+    if e > s:
+        return s, e
+
+    # Fallback: nimm das ganze erlaubte Fenster (falls min_s..max_s größer als Fenster)
+    lo = duration * lo_frac
+    hi = duration * hi_frac
+    window_len = max(0.0, hi - lo)
+    if window_len <= 0:
+        return 0.0, 0.0
+    return lo, lo + window_len
 
 def pick_segment_bounds_fixed(duration: float, seg_len: float) -> Tuple[float, float]:
-    if duration <= 0:
+    lo_frac, hi_frac = (0.0, 1.0) if duration < 120.0 else (0.10, 0.95)
+    if duration <= 0 or seg_len <= 0:
         return 0.0, 0.0
+
+    s, e = _choose_start_in_window(duration, seg_len, lo_frac, hi_frac)
+    if e > s:
+        return s, e
+
+    # Kein Platz im Fenster → wenn Segment >= Gesamtdauer, gib ganzen Clip zurück, sonst verwerfen
     if seg_len >= duration:
         return 0.0, duration
-    start = random.uniform(0, max(0.0, duration - seg_len))
+    return 0.0, 0.0
+
+def _choose_start_in_window(duration: float, seg_len: float, lo_frac: float, hi_frac: float) -> Tuple[float, float]:
+    """
+    Wählt einen Start gleichverteilt innerhalb [lo..hi - seg_len], sodass das Segment komplett im Fenster liegt.
+    Gibt (0.0, 0.0) zurück, wenn kein gültiger Bereich existiert.
+    """
+    if duration <= 0 or seg_len <= 0:
+        return 0.0, 0.0
+
+    lo = max(0.0, duration * lo_frac)
+    hi = min(duration, duration * hi_frac)
+    window_len = max(0.0, hi - lo)
+
+    # Segment passt nicht vollständig ins Fenster
+    if seg_len > window_len + 1e-9:
+        return 0.0, 0.0
+
+    # Grenzfall: exakt passend → Start = lo
+    if window_len - seg_len <= 1e-9:
+        start = lo
+        return start, start + seg_len
+
+    start = random.uniform(lo, hi - seg_len)
     return start, start + seg_len
+
 
 
 def clamp(val: float, lo: float, hi: float) -> float:
@@ -520,30 +562,111 @@ class _ClipCache:
                 pass
         self._cache.clear()
 
+# --- 1-beat run state (aktiv, wenn min_beats == 1) --------------------------
+
+# Anzahl noch ausstehender 1-Beat-Segmente in der aktuellen Folge.
+# 0 = kein Lauf aktiv.
+_one_beat_run_remaining = 0
+
+def _maybe_start_one_beat_run() -> int:
+    """
+    Starte mit kleiner Wahrscheinlichkeit einen 1-Beat-Lauf (2/4/6 Segmente).
+    Liefert die Anzahl der noch *zusätzlich* zu produzierenden 1er (also Restlauf).
+    """
+    # Du kannst die Startwahrscheinlichkeit gerne anpassen:
+    if random.random() < 0.0:  # 5% Chance, einen 1-Beat-Lauf zu beginnen
+        run_len = random.choice([4, 8, 16])
+        # Wir geben "Rest" zurück, denn den *ersten* 1er liefern wir direkt
+        return run_len - 1
+    return 0
+
 def compute_segment_bounds(src_dur: float,
                            bpm: Optional[float],
                            min_beats: int, max_beats: int, beat_mode: float,
-                           min_s: float, max_s: float, fps: float) -> tuple[float, float]:
+                           min_s: float, max_s: float, fps: float, trim_large_clips: bool) -> tuple[float, float]:
+    window_lo_frac, window_hi_frac = (0.0, 1.0) if src_dur < 120.0 or not trim_large_clips else (0.10, 0.95)
+    window_len = max(0.0, (window_hi_frac - window_lo_frac) * src_dur)
+
     if bpm and bpm > 0:
-        # Frame-exakter Beat: erst Einzellänge runden, dann multiplizieren
         beat_len = 60.0 / bpm
-        beats = choose_even_beats(min_beats, max_beats, mode_pos=beat_mode)
-        seg_len = round((beat_len * beats) * fps) / fps
 
+        global _one_beat_run_remaining
+        use_beats = None
+
+        if min_beats == 1:
+            # 1) Falls ein 1-Beat-Lauf aktiv ist, als nächstes wieder 1 Beat
+            if _one_beat_run_remaining > 0:
+                use_beats = 1
+            else:
+                # 2) Sonst normal „gerade Beats“ ziehen
+                #    (min=2, damit 1 nicht zufällig auftaucht)
+                even_beats = choose_even_beats(2, max_beats, mode_pos=beat_mode)
+
+                # 3) Optional einen 1-Beat-Lauf starten (setzt die nächsten N-1 Segmente auf 1)
+                maybe_rest = _maybe_start_one_beat_run()
+                if maybe_rest > 0:
+                    _one_beat_run_remaining = maybe_rest
+                    use_beats = 1  # erster 1er sofort
+                else:
+                    use_beats = even_beats
+        else:
+            # klassisch: nur gerade Beats
+            use_beats = choose_even_beats(min_beats, max_beats, mode_pos=beat_mode)
+
+        # Länge auf Frames runden
+        seg_len = round((beat_len * use_beats) * fps) / fps
+
+        # Passt das in den Quell-Clip?
         if src_dur + 1e-6 >= seg_len:
-            # Clip ist lang genug → normaler Pfad
-            return pick_segment_bounds_fixed(src_dur, seg_len)
+            # Commit: Wenn wir tatsächlich einen 1er verbrauchen, Run herunterzählen
+            if min_beats == 1 and use_beats == 1 and _one_beat_run_remaining > 0:
+                _one_beat_run_remaining -= 1
+            s, e = _choose_start_in_window(src_dur, seg_len, window_lo_frac, window_hi_frac)
+            if e > s:
+                return s, e
 
-        # Zu kurz: auf größtes *gerades* Beat-Multiple kürzen
-        max_beats_fit = int(math.floor((src_dur + 1e-9) / beat_len))
-        even_fit = max_beats_fit - (max_beats_fit % 2)  # 7->6, 5->4, 3->2, 2->2, 1->0
-        if even_fit >= 2:
-            snapped_len = round((beat_len * even_fit) * fps) / fps
-            return pick_segment_bounds_fixed(src_dur, snapped_len)
+        # --- Quellclip zu kurz: Fallback-Regeln -------------------------------
+        max_beats_fit = int(math.floor((window_len + 1e-9) / beat_len))
 
-        # Weniger als 2 Beats passen → Clip verwerfen
-        return (0.0, 0.0)
+        if min_beats == 1:
+            # a) Wenn mindestens 1 Beat passt und wir *gerade* einen 1er liefern sollen,
+            #    nehmen wir den 1er trotzdem (und zählen Run herunter).
+            if use_beats == 1 and max_beats_fit >= 1:
+                snapped_len = round((beat_len * 1) * fps) / fps
+                if _one_beat_run_remaining > 0:
+                    _one_beat_run_remaining -= 1
+                s, e = _choose_start_in_window(src_dur, snapped_len, window_lo_frac, window_hi_frac)
+                return (s, e) if e > s else (0.0, 0.0)
+
+            # b) Sonst versuchen wir den größten *geraden* Fit (2,4,6,…)
+            even_fit = max_beats_fit - (max_beats_fit % 2)
+            if even_fit >= 2:
+                snapped_len = round((beat_len * even_fit) * fps) / fps
+                s, e = _choose_start_in_window(src_dur, snapped_len, window_lo_frac, window_hi_frac)
+                return (s, e) if e > s else (0.0, 0.0)
+
+            # c) Weniger als 2 Beats passen insgesamt – wenn wenigstens 1 Beat passt,
+            #    und wir *in einem Lauf* sind, geben wir 1 Beat zurück (um den Lauf nicht zu „brechen“).
+            if max_beats_fit >= 1 and _one_beat_run_remaining > 0:
+                snapped_len = round((beat_len * 1) * fps) / fps
+                _one_beat_run_remaining -= 1
+                s, e = _choose_start_in_window(src_dur, snapped_len, window_lo_frac, window_hi_frac)
+                return (s, e) if e > s else (0.0, 0.0)
+
+            # d) Sonst verwerfen
+            return (0.0, 0.0)
+
+        else:
+            # Klassischer Fallback: größtes gerades Multiple (>=2), sonst verwerfen
+            even_fit = max_beats_fit - (max_beats_fit % 2)  # 7->6, 5->4, 3->2, 2->2, 1->0
+            if even_fit >= 2:
+                snapped_len = round((beat_len * even_fit) * fps) / fps
+                return pick_segment_bounds_fixed(src_dur, snapped_len)
+
+            return (0.0, 0.0)
+
     else:
+        # Zeit-basierter Modus (unverändert)
         return pick_segment_bounds_random_seconds(src_dur, min_s, max_s)
 
 # ---------------- main build ----------------
@@ -572,6 +695,7 @@ def build_montage(
     beat_mode: float,
     preview: bool,
     triptych_carry: float,
+    trim_large_clips: bool,
 ):
     setup_tempfile_cleanup(out_path)
 
@@ -663,12 +787,12 @@ def build_montage(
                     continue
 
                 start, end = compute_segment_bounds(
-                    src.duration, effective_bpm, min_beats, max_beats, beat_mode, min_seconds, max_seconds, fps
+                    src.duration, effective_bpm, min_beats, max_beats, beat_mode, min_seconds, max_seconds, fps, trim_large_clips
                 )
                 if end <= start:
                     continue
-
                 sub = src.subclip(start, end)
+
                 filled = cover_scale_and_crop(sub, default_w, default_h)
                 segments.append(filled)
                 total += filled.duration
@@ -1169,6 +1293,7 @@ def parse_args(argv=None):
                    help="Während des Renderns Preview-JPGs schreiben (true/false, default: true).")
     p.add_argument("--triptych-carry", type=float, default=0.3,
                    help="Wahrscheinlichkeit (0.0–1.0), dass das Mittel-Panel des Triptychons vom Seiten-Panel des vorherigen übernommen wird (default: 0.3).")
+    p.add_argument("--trim-large-clips", action="store_true", help="Lange Clips nur segmentweise nutzen (default: ganz verwenden).")
 
     args = p.parse_args(argv)
 
@@ -1209,13 +1334,18 @@ def parse_args(argv=None):
             return None
         return n if n % 2 == 0 else (n - 1 if n > 0 else 0)
 
-    args.min_beats = make_even(max(2, args.min_beats))
-    args.max_beats = make_even(max(2, args.max_beats))
     if args.max_beats < args.min_beats:
         args.min_beats, args.max_beats = args.max_beats, args.min_beats
 
-    args.min_beats = max(2, args.min_beats)
-    args.max_beats = max(args.min_beats, args.max_beats)
+    if args.min_beats == 1:
+        # min bleibt 1; max bleibt gerade (>=2)
+        args.max_beats = max(2, make_even(args.max_beats))
+        # Falls jemand max < 2 gesetzt hat, heben wir es auf 2 an (bereits durch max(..,2) erledigt)
+    else:
+        # Standardmodus: nur gerade Beats (min/max >= 2, gerade)
+        args.min_beats = max(2, make_even(args.min_beats))
+        # max muss >= min und gerade sein
+        args.max_beats = max(args.min_beats, make_even(args.max_beats))
 
     args.preview = (args.preview.lower() == "true")
 
@@ -1251,6 +1381,7 @@ def main(argv=None):
         beat_mode=args.beat_mode,
         preview=args.preview,
         triptych_carry=args.triptych_carry,
+        trim_large_clips = args.trim_large_clips
     )
 
 
