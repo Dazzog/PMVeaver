@@ -24,7 +24,7 @@
 #   --output PATH           output video file (required)
 #   --width INT             resize output (default: keep source sizes)
 #   --height INT            resize output (default: keep source sizes)
-#   --fps INT               output fps (default 30)
+#   --fps FLOAT             output fps (default 30)
 #   --bg-volume FLOAT       volume multiplier for background audio (default 1.0)
 #   --clip-volume FLOAT     volume multiplier for clip audio (default 0.8)
 #   --clip-reverb FLOAT     multiplier for clip reverb (default 0.2)
@@ -288,11 +288,11 @@ def make_triptych(clipA: VideoFileClip, clipB: VideoFileClip, target_w: int, tar
 def detect_bpm_with_librosa(audio_path: Path) -> float:
     import librosa
 
-    y, sr = librosa.load(str(audio_path), sr=22050, mono=True, duration=90.0)
+    y, sr = librosa.load(str(audio_path), sr=None, mono=True, duration=90.0)
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
     if tempo is None or tempo <= 0:
         raise RuntimeError("Could not detect BPM from audio.")
-    return float(tempo)
+    return round(float(tempo))
 
 
 def _even_bounds(lo: int, hi: int) -> Tuple[int, int, List[int]]:
@@ -308,24 +308,41 @@ def _even_bounds(lo: int, hi: int) -> Tuple[int, int, List[int]]:
 
 def choose_even_beats(min_beats: int, max_beats: int, mode_pos: float = 0.25) -> int:
     """
-    Choose an even beat count in [min_beats, max_beats] using a triangular weighting:
-    mode_pos in [0..1] sets where the maximum probability lies between min and max.
+    Draw an even beat count from [min_beats, max_beats] using a triangular weighting.
+    mode_pos in [0..1]: 0 = peak at min, 1 = peak at max. No weight ever becomes zero.
     """
     lo, hi, evens = _even_bounds(min_beats, max_beats)
     if not evens:
         return 2
+
     mode_pos = clamp(mode_pos, 0.0, 1.0)
     mode = lo + mode_pos * (hi - lo)
+
     eps = 1e-9
-    denom_left  = max(mode - lo, eps)
-    denom_right = max(hi - mode, eps)
+    span = max(hi - lo, eps)
+    MIN_WEIGHT = 0.1  # floor so nothing ever drops to zero
+
     weights: List[float] = []
-    for b in evens:
-        if b <= mode:
-            w = (b - lo) / denom_left
-        else:
-            w = (hi - b) / denom_right
-        weights.append(max(w, 0.05))  # small floor so extremes never vanish
+
+    if mode <= lo + eps:
+        # Peak exactly at left edge
+        for b in evens:
+            w = 1.0 - (b - lo) / span
+            weights.append(max(w, MIN_WEIGHT))
+    elif mode >= hi - eps:
+        # Peak exactly at right edge
+        for b in evens:
+            w = 1.0 - (hi - b) / span
+            weights.append(max(w, MIN_WEIGHT))
+    else:
+        # Peak inside: symmetric triangle around `mode`
+        left  = max(mode - lo, eps)
+        right = max(hi - mode, eps)
+        denom = max(left, right)
+        for b in evens:
+            w = 1.0 - abs(b - mode) / denom
+            weights.append(max(w, MIN_WEIGHT))
+
     return random.choices(evens, weights=weights, k=1)[0]
 
 def estimate_beat_offset_with_librosa(audio_path: Path, bpm_hint: Optional[float] = None) -> Tuple[float, float]:
@@ -335,7 +352,7 @@ def estimate_beat_offset_with_librosa(audio_path: Path, bpm_hint: Optional[float
     """
     import librosa
 
-    y, sr = librosa.load(str(audio_path), sr=22050, mono=True, duration=60.0)
+    y, sr = librosa.load(str(audio_path), sr=None, mono=True, duration=60.0)
     oenv = librosa.onset.onset_strength(y=y, sr=sr)
 
     tempo, beat_frames = librosa.beat.beat_track(
@@ -506,7 +523,7 @@ class _ClipCache:
 def compute_segment_bounds(src_dur: float,
                            bpm: Optional[float],
                            min_beats: int, max_beats: int, beat_mode: float,
-                           min_s: float, max_s: float, fps: int) -> tuple[float, float]:
+                           min_s: float, max_s: float, fps: float) -> tuple[float, float]:
     if bpm and bpm > 0:
         # Frame-exakter Beat: erst Einzellänge runden, dann multiplizieren
         beat_len = 60.0 / bpm
@@ -537,7 +554,7 @@ def build_montage(
     out_path: Path,
     min_seconds: float,
     max_seconds: float,
-    fps: int,
+    fps: float,
     width: Optional[int],
     height: Optional[int],
     codec: str,
@@ -1123,7 +1140,7 @@ def parse_args(argv=None):
     p.add_argument("--min-seconds", type=float, default=2.0)
     p.add_argument("--max-seconds", type=float, default=5.0)
 
-    p.add_argument("--fps", type=int, default=30)
+    p.add_argument("--fps", type=float, default=30.0)
     p.add_argument("--width", type=int)
     p.add_argument("--height", type=int)
     p.add_argument("--codec", default="libx264")
@@ -1169,7 +1186,7 @@ def parse_args(argv=None):
         args.min_seconds, args.max_seconds = args.max_seconds, args.min_seconds
 
     # FPS & dimensions
-    args.fps = clamp(args.fps, 1, 240)
+    args.fps = clamp(args.fps, 1.0, 240.0)
     args.width = clamp(args.width, 16, 8192)
     args.height = clamp(args.height, 16, 8192)
 

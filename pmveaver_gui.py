@@ -73,6 +73,120 @@ def hms(seconds: float) -> str:
     h, rem = divmod(s, 3600); m, s = divmod(rem, 60)
     return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
+# --- In pmveaver_gui.py, z.B. oberhalb von PMVeaverQt hinzufügen ---
+class TriangularDistWidget(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(100)
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+        self._min_beats = 2
+        self._max_beats = 8
+        self._mode_pos = 0.25  # 0..1
+        self.setToolTip("Triangular weighting over even beats")
+
+    def setParams(self, min_beats: int, max_beats: int, mode_pos: float):
+        changed = (self._min_beats != min_beats) or (self._max_beats != max_beats) or (abs(self._mode_pos - mode_pos) > 1e-6)
+        self._min_beats = min_beats
+        self._max_beats = max_beats
+        self._mode_pos = max(0.0, min(1.0, mode_pos))
+        if changed:
+            self.update()
+
+    @staticmethod
+    def _even_list(lo:int, hi:int):
+        lo, hi = sorted((int(lo), int(hi)))
+        evens = [b for b in range(lo, hi+1) if b % 2 == 0 and b > 0]
+        if not evens:
+            evens = [2]
+        return lo, hi, evens
+
+    def _weights(self):
+        # Mirror the core logic from pmveaver.choose_even_beats
+        lo, hi, evens = self._even_list(self._min_beats, self._max_beats)
+        mode = lo + self._mode_pos * (hi - lo)
+
+        eps = 1e-9
+        span = max(hi - lo, eps)
+        MIN_WEIGHT = 0.1
+
+        ws = []
+        if mode <= lo + eps:
+            for b in evens:
+                w = 1.0 - (b - lo) / span
+                ws.append(max(w, MIN_WEIGHT))
+        elif mode >= hi - eps:
+            for b in evens:
+                w = 1.0 - (hi - b) / span
+                ws.append(max(w, MIN_WEIGHT))
+        else:
+            left = max(mode - lo, eps)
+            right = max(hi - mode, eps)
+            denom = max(left, right)
+            for b in evens:
+                w = 1.0 - abs(b - mode) / denom
+                ws.append(max(w, MIN_WEIGHT))
+
+        # Normieren für die Darstellung (Y=0..1)
+        mx = max(ws) if ws else 1.0
+        ws = [w / mx for w in ws]
+        return evens, ws
+
+    def paintEvent(self, e: QtGui.QPaintEvent):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        rect = self.rect().adjusted(6, 6, -6, -6)
+
+        # Hintergrund/ Rahmen
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(self.palette().base())
+        p.drawRect(rect)
+
+        # Achsen
+        p.setPen(self.palette().mid().color())
+        p.drawRect(rect)
+
+        evens, ws = self._weights()
+        if not evens:
+            return
+
+        # Balkenbreite
+        n = len(evens)
+        gap = 4
+        bar_w = max(6, (rect.width() - gap*(n+1)) // max(1, n))
+
+        # Textfarbe
+        txt_pen = QtGui.QPen(self.palette().text().color())
+
+        # Bars
+        x = rect.left() + gap
+        max_h = rect.height()  # Platz für Labels
+        bar_brush = QtGui.QBrush(self.palette().highlight().color())
+
+        for i, (b, w) in enumerate(zip(evens, ws)):
+            h = int(max_h * w)
+            bar_rect = QtCore.QRect(x, rect.bottom() - h - 24, bar_w, h)
+            p.fillRect(bar_rect, bar_brush)
+
+            # Beat-Label
+            p.setPen(txt_pen)
+            lbl = str(b) + ' beats'
+            metrics = p.fontMetrics()
+            tw = metrics.horizontalAdvance(lbl)
+            p.drawText(x + (bar_w - tw)//2, rect.bottom() - 8, lbl)
+
+            x += bar_w + gap
+
+        # Mode-Marker (vertikale Linie)
+        lo, hi, _ = self._even_list(self._min_beats, self._max_beats)
+        if hi > lo:
+            rel = (self._mode_pos)  # 0..1
+            x_mode = rect.left() + int(rect.width() * rel)
+            pen = QtGui.QPen(self.palette().highlight().color())
+            pen.setStyle(QtCore.Qt.DashLine)
+            p.setPen(pen)
+            p.drawLine(x_mode, rect.top(), x_mode, rect.bottom())
+
+
 class PMVeaverQt(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -253,7 +367,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         root.addLayout(btn_row)
 
         # Auto-Größe
-        self.resize(900, 700)
+        self.resize(640, 840)
 
         self._check_ffmpeg()
 
@@ -277,9 +391,10 @@ class PMVeaverQt(QtWidgets.QWidget):
         self.sb_h.setRange(16, 16384);
         self.sb_h.setValue(1080);
         self.sb_h.setSuffix(" px")
-        self.sb_fps = QtWidgets.QSpinBox();
-        self.sb_fps.setRange(1, 240);
-        self.sb_fps.setValue(30);
+        self.sb_fps = QtWidgets.QDoubleSpinBox();
+        self.sb_fps.setDecimals(2);
+        self.sb_fps.setRange(1.0, 240.0);
+        self.sb_fps.setValue(30.0);
         self.sb_fps.setSuffix(" fps")
 
         # Alle drei gleichmäßig dehnbar machen
@@ -291,15 +406,11 @@ class PMVeaverQt(QtWidgets.QWidget):
         lab_w.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
         lab_h = QtWidgets.QLabel("Height");
         lab_h.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-        lab_f = QtWidgets.QLabel("FPS");
-        lab_f.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
 
         g.addWidget(lab_w, 0, 0);
         g.addWidget(self.sb_w, 0, 1)
         g.addWidget(lab_h, 0, 2);
         g.addWidget(self.sb_h, 0, 3)
-        g.addWidget(lab_f, 0, 4);
-        g.addWidget(self.sb_fps, 0, 5)
 
         self.ds_triptych_carry = QtWidgets.QSpinBox()
         self.ds_triptych_carry.setRange(0, 100)
@@ -309,11 +420,16 @@ class PMVeaverQt(QtWidgets.QWidget):
         g.addWidget(QtWidgets.QLabel("Triptych carry"), 1, 0)
         g.addWidget(self.ds_triptych_carry, 1, 1)
 
+        lab_f = QtWidgets.QLabel("FPS");
+        lab_f.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        g.addWidget(lab_f, 1, 2);
+        g.addWidget(self.sb_fps, 1, 3)
+
         # alle drei Spinbox-Spalten gleich stretchen
-        for col in (1, 3, 5):
+        for col in (1, 3):
             g.setColumnStretch(col, 1)
         # Labels schmal halten
-        for col in (0, 2, 4):
+        for col in (0, 2):
             g.setColumnMinimumWidth(col, 80)
 
         return w
@@ -359,50 +475,107 @@ class PMVeaverQt(QtWidgets.QWidget):
         self.ds_rev.valueChanged.connect(lambda val: self.sl_rev.setValue(int(round(val))))
 
         # Layout: [Label | Slider | Zahl] x 3 – Slider-Spalten gleich stretchen
-        row = 0
-        g.addWidget(QtWidgets.QLabel("Audio Volume"), row, 0)
-        g.addWidget(self.sl_bg, row, 1)
-        g.addWidget(self.ds_bg, row, 2)
+        g.addWidget(QtWidgets.QLabel("Audio Volume"), 0, 0)
+        g.addWidget(self.sl_bg, 0, 1)
+        g.addWidget(self.ds_bg, 0, 2)
 
-        g.addWidget(QtWidgets.QLabel("Clip Volume"), row, 3)
-        g.addWidget(self.sl_clip, row, 4)
-        g.addWidget(self.ds_clip, row, 5)
+        g.addWidget(QtWidgets.QLabel("Clip Volume"), 1, 0)
+        g.addWidget(self.sl_clip, 1, 1)
+        g.addWidget(self.ds_clip, 1, 2)
 
-        g.addWidget(QtWidgets.QLabel("Clip Reverb"), row, 6)
-        g.addWidget(self.sl_rev, row, 7)
-        g.addWidget(self.ds_rev, row, 8)
+        g.addWidget(QtWidgets.QLabel("Clip Reverb"), 2, 0)
+        g.addWidget(self.sl_rev, 2, 1)
+        g.addWidget(self.ds_rev, 2, 2)
 
-        # Alle drei Slider-Spalten gleich verteilen
-        for col in (1, 4, 7):
-            g.setColumnStretch(col, 1)
-
-        # (optional) Labels auf minimale Breite bringen, damit’s sauber aussieht
-        for col in (0, 3, 6):
-            g.setColumnMinimumWidth(col, 90)
+        g.setColumnMinimumWidth(0, 90)
 
         return w
 
     def _panel_bpm(self):
-        w = QtWidgets.QWidget(); g = QtWidgets.QGridLayout(w)
+        w = QtWidgets.QWidget()
+        g = QtWidgets.QGridLayout(w)
+
+        g.setVerticalSpacing(12)
+
         self.chk_bpm = QtWidgets.QCheckBox("Automatically detect BPM (librosa)")
         self.chk_bpm.setChecked(True)
         self.chk_bpm.toggled.connect(self._sync_bpm_ui)
-        g.addWidget(self.chk_bpm, 0,0,1,6)
+        g.addWidget(self.chk_bpm, 0, 0, 1, 2)
 
-        self.ed_bpm = QtWidgets.QLineEdit(); self.ed_bpm.setPlaceholderText("BPM (manual)")
-        g.addWidget(QtWidgets.QLabel("BPM (manual)"), 1,0)
-        g.addWidget(self.ed_bpm,                     1,1)
+        self.ed_bpm = QtWidgets.QLineEdit()
+        self.ed_bpm.setPlaceholderText("BPM (manual)")
+        g.addWidget(QtWidgets.QLabel("BPM (manual)"), 1, 0)
+        g.addWidget(self.ed_bpm, 1, 1)
 
-        self.sb_min_beats = QtWidgets.QSpinBox(); self.sb_min_beats.setRange(2,64); self.sb_min_beats.setSingleStep(2); self.sb_min_beats.setValue(2)
-        self.sb_max_beats = QtWidgets.QSpinBox(); self.sb_max_beats.setRange(2,64); self.sb_max_beats.setSingleStep(2); self.sb_max_beats.setValue(8)
-        g.addWidget(QtWidgets.QLabel("Min beats"), 1,2); g.addWidget(self.sb_min_beats, 1,3)
-        g.addWidget(QtWidgets.QLabel("Max beats"), 1,4); g.addWidget(self.sb_max_beats, 1,5)
+        self.sb_min_beats = QtWidgets.QSpinBox()
+        self.sb_min_beats.setRange(2, 64)
+        self.sb_min_beats.setSingleStep(2)
+        self.sb_min_beats.setValue(2)
 
-        self.ds_beat_mode = QtWidgets.QDoubleSpinBox(); self.ds_beat_mode.setRange(0.0,1.0); self.ds_beat_mode.setSingleStep(0.01); self.ds_beat_mode.setDecimals(2); self.ds_beat_mode.setValue(0.25)
-        g.addWidget(QtWidgets.QLabel("Beat mode (0..1, peak position)"), 2,0,1,2)
-        g.addWidget(self.ds_beat_mode, 2,2,1,4)
-        g.setColumnStretch(5,1)
+        self.sb_max_beats = QtWidgets.QSpinBox()
+        self.sb_max_beats.setRange(2, 64)
+        self.sb_max_beats.setSingleStep(2)
+        self.sb_max_beats.setValue(8)
+
+        g.addWidget(QtWidgets.QLabel("Min beats"), 0, 2)
+        g.addWidget(self.sb_min_beats, 0, 3)
+        g.addWidget(QtWidgets.QLabel("Max beats"), 1, 2)
+        g.addWidget(self.sb_max_beats, 1, 3)
+
+        # --- Clip length probabilities panel ---
+        frame = QtWidgets.QGroupBox("Clip length probabilities")
+        frame.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        vbox = QtWidgets.QVBoxLayout(frame)
+        vbox.setContentsMargins(8, 8, 8, 8)
+        vbox.setSpacing(8)
+
+        self.dist_widget = TriangularDistWidget()
+        self.dist_widget.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        vbox.addWidget(self.dist_widget, stretch=1)
+
+        self.sl_beat_mode = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.sl_beat_mode.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+        self.sl_beat_mode.setRange(0, 100)
+        self.sl_beat_mode.setValue(25)
+        vbox.addWidget(self.sl_beat_mode)
+
+        g.addWidget(frame, 2, 0, 1, 4)
+
+        # Hidden storage for beat mode value (so core logic still works)
+        self.ds_beat_mode = QtWidgets.QDoubleSpinBox()
+        self.ds_beat_mode.setRange(0.0, 1.0)
+        self.ds_beat_mode.setDecimals(3)
+        self.ds_beat_mode.setSingleStep(0.01)
+        self.ds_beat_mode.setValue(0.25)
+        self.ds_beat_mode.hide()
+
+        # Wire slider <-> hidden spinbox
+        def _sync_from_slider(v):
+            f = v / 100.0
+            self.ds_beat_mode.blockSignals(True)
+            self.ds_beat_mode.setValue(f)
+            self.ds_beat_mode.blockSignals(False)
+            self._update_dist_plot()
+
+        self.sl_beat_mode.valueChanged.connect(_sync_from_slider)
+
+        # Änderungen an Min/Max aktualisieren die Grafik
+        self.sb_min_beats.valueChanged.connect(lambda _: self._update_dist_plot())
+        self.sb_max_beats.valueChanged.connect(lambda _: self._update_dist_plot())
+
+        QtCore.QTimer.singleShot(0, self._update_dist_plot)
+
+        # alle drei Spinbox-Spalten gleich stretchen
+        for col in (1, 3):
+            g.setColumnStretch(col, 1)
+        # Labels schmal halten
+        for col in (0, 2):
+            g.setColumnMinimumWidth(col, 80)
+
         return w
+
+    def _update_dist_plot(self):
+        self.dist_widget.setParams(self.sb_min_beats.value(), self.sb_max_beats.value(), self.ds_beat_mode.value())
 
     def _panel_time_fallback(self):
         w = QtWidgets.QWidget();
@@ -1013,11 +1186,9 @@ class PMVeaverQt(QtWidgets.QWidget):
             "--bg-volume", f"{self.sl_bg.value() / 100.0:.2f}",
             "--clip-volume", f"{self.sl_clip.value() / 100.0:.2f}",
             "--clip-reverb", f"{self.sl_rev.value() / 100.0:.2f}",
-            "--min-seconds", f"{self.ds_min_seconds.value():.2f}",
-            "--max-seconds", f"{self.ds_max_seconds.value():.2f}",
             "--codec", self.cb_codec.currentText(),
             "--audio-codec", self.cb_audio.currentText(),
-            "--triptych_carry", str(self.ds_triptych_carry.value() / 100.0)
+            "--triptych-carry", str(self.ds_triptych_carry.value() / 100.0)
         ]
 
         if self.cb_preset.isEnabled() and self.cb_preset.currentText():
@@ -1027,16 +1198,28 @@ class PMVeaverQt(QtWidgets.QWidget):
         if self.ed_threads.text().strip():
             args += ["--threads", self.ed_threads.text().strip()]
 
-        # BPM-Handling
+        # BPM / Sekunden Handling
         if self.chk_bpm.isChecked():
+            # Automatische BPM-Erkennung
             args += ["--bpm-detect"]
-        else:
-            if self.ed_bpm.text().strip():
-                args += ["--bpm", self.ed_bpm.text().strip()]
             args += [
                 "--min-beats", str(self.sb_min_beats.value()),
                 "--max-beats", str(self.sb_max_beats.value()),
                 "--beat-mode", f"{self.ds_beat_mode.value():.2f}"
+            ]
+        elif self.ed_bpm.text().strip():
+            # Manuelle BPM-Eingabe
+            args += ["--bpm", self.ed_bpm.text().strip()]
+            args += [
+                "--min-beats", str(self.sb_min_beats.value()),
+                "--max-beats", str(self.sb_max_beats.value()),
+                "--beat-mode", f"{self.ds_beat_mode.value():.2f}"
+            ]
+        else:
+            # Fallback: Sekundenwerte
+            args += [
+                "--min-seconds", f"{self.ds_min_seconds.value():.2f}",
+                "--max-seconds", f"{self.ds_max_seconds.value():.2f}"
             ]
 
         # Preview explizit mit true/false
