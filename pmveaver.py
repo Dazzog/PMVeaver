@@ -554,6 +554,7 @@ def build_montage(
     max_beats: int,
     beat_mode: float,
     preview: bool,
+    triptych_carry: float,
 ):
     setup_tempfile_cleanup(out_path)
 
@@ -620,6 +621,7 @@ def build_montage(
 
     segments: List[VideoFileClip] = []
     total = 0.0
+    carry_portrait_path: Optional[Path] = None  # last triptych's side (A) becomes next center (B)
 
     pbar = tqdm(total=target_duration, desc="PMVeaver - Collecting clips", unit="s")
     default_w = width or 1920
@@ -655,12 +657,26 @@ def build_montage(
                 total += filled.duration
 
             else:  # choice == "portrait"
-                pathA = next_portrait()
-                if (pathA is None):
-                    continue
-                pathB = next_portrait()
-                if pathB is None:
-                    continue
+                # Reuse previous side as current center with given probability
+                if carry_portrait_path is not None and random.random() < triptych_carry:
+                    pathA = next_portrait()
+                    if pathA is None:
+                        continue
+
+                    # avoid A == B (otherwise all three panels would be the same source)
+                    if pathA == carry_portrait_path:
+                        alt = next_portrait()
+                        if alt is not None:
+                            pathA = alt
+                    pathB = carry_portrait_path
+
+                else:
+                    pathA = next_portrait()
+                    if pathA is None:
+                        continue
+                    pathB = next_portrait()
+                    if pathB is None:
+                        continue
 
                 infoA = probe_cache.get(pathA)
                 infoB = probe_cache.get(pathB)
@@ -699,6 +715,10 @@ def build_montage(
                 trip = make_triptych(subA, subB, default_w, default_h)
                 segments.append(trip)
                 total += trip.duration
+
+                # prepare carry-over for next triptych
+                if triptych_carry:
+                    carry_portrait_path = pathA
 
             if segments:
                 pbar.update(segments[-1].duration)
@@ -1130,9 +1150,59 @@ def parse_args(argv=None):
 
     p.add_argument("--preview", choices=["true", "false"], default="true",
                    help="Während des Renderns Preview-JPGs schreiben (true/false, default: true).")
+    p.add_argument("--triptych-carry", type=float, default=0.3,
+                   help="Wahrscheinlichkeit (0.0–1.0), dass das Mittel-Panel des Triptychons vom Seiten-Panel des vorherigen übernommen wird (default: 0.3).")
 
     args = p.parse_args(argv)
+
+    # --- Clamping & Sanitizing ---
+
+    def clamp(v, lo, hi):
+        if v is None:
+            return None
+        return lo if v < lo else hi if v > hi else v
+
+    # Seconds
+    args.min_seconds = clamp(args.min_seconds, 0.2, 30.0)
+    args.max_seconds = clamp(args.max_seconds, 0.3, 60.0)
+    if args.max_seconds < args.min_seconds:
+        args.min_seconds, args.max_seconds = args.max_seconds, args.min_seconds
+
+    # FPS & dimensions
+    args.fps = clamp(args.fps, 1, 240)
+    args.width = clamp(args.width, 16, 8192)
+    args.height = clamp(args.height, 16, 8192)
+
+    # Threads
+    args.threads = clamp(args.threads, 1, 64)
+
+    # Volumes & reverb
+    args.bg_volume = clamp(args.bg_volume, 0.0, 4.0)
+    args.clip_volume = clamp(args.clip_volume, 0.0, 4.0)
+    args.clip_reverb = clamp(args.clip_reverb, 0.0, 1.0)
+
+    # BPM / Beat-Mode
+    if args.bpm is not None:
+        args.bpm = clamp(args.bpm, 30.0, 300.0)
+    args.beat_mode = clamp(args.beat_mode, 0.0, 1.0)
+
+    # Even-beats erzwingen und Min/Max konsistent halten
+    def make_even(n):
+        if n is None:
+            return None
+        return n if n % 2 == 0 else (n - 1 if n > 0 else 0)
+
+    args.min_beats = make_even(max(2, args.min_beats))
+    args.max_beats = make_even(max(2, args.max_beats))
+    if args.max_beats < args.min_beats:
+        args.min_beats, args.max_beats = args.max_beats, args.min_beats
+
+    args.min_beats = max(2, args.min_beats)
+    args.max_beats = max(args.min_beats, args.max_beats)
+
     args.preview = (args.preview.lower() == "true")
+
+    args.triptych_carry = max(0.0, min(1.0, args.triptych_carry))
 
     return args
 
@@ -1163,6 +1233,7 @@ def main(argv=None):
         max_beats=args.max_beats,
         beat_mode=args.beat_mode,
         preview=args.preview,
+        triptych_carry=args.triptych_carry,
     )
 
 

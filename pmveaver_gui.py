@@ -301,6 +301,14 @@ class PMVeaverQt(QtWidgets.QWidget):
         g.addWidget(lab_f, 0, 4);
         g.addWidget(self.sb_fps, 0, 5)
 
+        self.ds_triptych_carry = QtWidgets.QSpinBox()
+        self.ds_triptych_carry.setRange(0, 100)
+        self.ds_triptych_carry.setSingleStep(5)
+        self.ds_triptych_carry.setValue(30)
+        self.ds_triptych_carry.setSuffix(" %")
+        g.addWidget(QtWidgets.QLabel("Triptych carry"), 1, 0)
+        g.addWidget(self.ds_triptych_carry, 1, 1)
+
         # alle drei Spinbox-Spalten gleich stretchen
         for col in (1, 3, 5):
             g.setColumnStretch(col, 1)
@@ -326,29 +334,29 @@ class PMVeaverQt(QtWidgets.QWidget):
         self.sl_rev = slider(20, to=100)  # 0.20
 
         # Editierbare Zahlenfelder (anzeigen + tippen erlaubt)
-        def dspin(minv, maxv, init, step=0.01, suffix="x"):
+        def dspin(minv, maxv, init, step=1, suffix="%"):
             ds = QtWidgets.QDoubleSpinBox()
             ds.setRange(minv, maxv)
-            ds.setDecimals(2)
+            ds.setDecimals(0)
             ds.setSingleStep(step)
             ds.setValue(init)
             ds.setSuffix(suffix)
             ds.setFixedWidth(72)
             return ds
 
-        self.ds_bg = dspin(0.00, 2.00, 1.00, suffix="")
-        self.ds_clip = dspin(0.00, 2.00, 0.80, suffix="")
-        self.ds_rev = dspin(0.00, 1.00, 0.20, suffix="")
+        self.ds_bg = dspin(0, 200, 1000)
+        self.ds_clip = dspin(0, 200, 80)
+        self.ds_rev = dspin(0, 100, 20)
 
         # Bidirektionale Verdrahtung (Slider <-> SpinBox)
-        self.sl_bg.valueChanged.connect(lambda v: self.ds_bg.setValue(v / 100.0))
-        self.ds_bg.valueChanged.connect(lambda val: self.sl_bg.setValue(int(round(val * 100))))
+        self.sl_bg.valueChanged.connect(lambda v: self.ds_bg.setValue(v))
+        self.ds_bg.valueChanged.connect(lambda val: self.sl_bg.setValue(int(round(val))))
 
-        self.sl_clip.valueChanged.connect(lambda v: self.ds_clip.setValue(v / 100.0))
-        self.ds_clip.valueChanged.connect(lambda val: self.sl_clip.setValue(int(round(val * 100))))
+        self.sl_clip.valueChanged.connect(lambda v: self.ds_clip.setValue(v))
+        self.ds_clip.valueChanged.connect(lambda val: self.sl_clip.setValue(int(round(val))))
 
-        self.sl_rev.valueChanged.connect(lambda v: self.ds_rev.setValue(v / 100.0))
-        self.ds_rev.valueChanged.connect(lambda val: self.sl_rev.setValue(int(round(val * 100))))
+        self.sl_rev.valueChanged.connect(lambda v: self.ds_rev.setValue(v))
+        self.ds_rev.valueChanged.connect(lambda val: self.sl_rev.setValue(int(round(val))))
 
         # Layout: [Label | Slider | Zahl] x 3 – Slider-Spalten gleich stretchen
         row = 0
@@ -1009,6 +1017,7 @@ class PMVeaverQt(QtWidgets.QWidget):
             "--max-seconds", f"{self.ds_max_seconds.value():.2f}",
             "--codec", self.cb_codec.currentText(),
             "--audio-codec", self.cb_audio.currentText(),
+            "--triptych_carry", str(self.ds_triptych_carry.value() / 100.0)
         ]
 
         if self.cb_preset.isEnabled() and self.cb_preset.currentText():
