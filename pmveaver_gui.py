@@ -431,6 +431,9 @@ class PMVeaverQt(QtWidgets.QWidget):
         g.addWidget(lab_f, 1, 2);
         g.addWidget(self.sb_fps, 1, 3)
 
+        self.chk_pulse = QtWidgets.QCheckBox("Beat pulse effect")
+        g.addWidget(self.chk_pulse, 2, 0, 1, 2)
+
         # alle drei Spinbox-Spalten gleich stretchen
         for col in (1, 3):
             g.setColumnStretch(col, 1)
@@ -1231,6 +1234,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         # Preview explizit mit true/false
         args += ["--preview", "true" if self.chk_preview.isChecked() else "false"]
 
+        if self.chk_pulse.isChecked(): args += ["--pulse-effect"]
         if self.chk_trim.isChecked(): args += ["--trim-large-clips"]
 
         return args

@@ -696,6 +696,7 @@ def build_montage(
     preview: bool,
     triptych_carry: float,
     trim_large_clips: bool,
+    pulse_effect: bool,
 ):
     setup_tempfile_cleanup(out_path)
 
@@ -880,6 +881,77 @@ def build_montage(
     # Concatenate (no crossfade)
     montage = concatenate_videoclips(segments, method="chain")
     montage = montage.subclip(0, target_duration).set_fps(fps)
+
+    # --- Beat-Pulse (Zoom + Blur) ----------------------------------------------
+    PULSE_ZOOM_MAX = 0.06  # bis zu +6% Zoom am Beat
+    PULSE_BLUR_MAX = 4.2  # bis zu 1.8 px GaussianBlur am Beat
+    PULSE_DECAY = 6.0  # exponentieller Abfall innerhalb eines Beats
+
+    if pulse_effect and effective_bpm and effective_bpm > 0:
+        import numpy as _np
+        from PIL import Image, ImageFilter
+        import librosa
+
+        y, sr = librosa.load(str(audio_path), sr=None, mono=True)
+        # RMS Energie pro Frame (z. B. 2048 Samples Fenster)
+        rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=512)[0]
+        times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=512)
+
+        # Normalisieren 0..1
+        rms /= rms.max()
+
+        def volume_at(t: float) -> float:
+            tt = t + (beat_offset or 0.0)
+            idx = np.searchsorted(times, tt)
+            if idx <= 0: return float(rms[0])
+            if idx >= len(rms): return float(rms[-1])
+            return float(rms[idx])
+
+        beat_len = 60.0 / effective_bpm
+
+        def _pulse_intensity(t: float) -> float:
+            ph = (max(0.0, t) % beat_len) / beat_len
+            return math.exp(-PULSE_DECAY * ph)
+
+        def _pulse_frame(get_frame, t: float):
+            frame = get_frame(t)  # np.uint8 (H,W,3) oder (H,W,4) / Maske wäre (H,W)
+
+            beat_factor = _pulse_intensity(t)  # 0..1 aus BPM-Phase
+            vol_factor = volume_at(t)  # 0..1 aus Audio
+            inten = beat_factor * (0.2 + vol_factor * 2)
+
+            if inten <= 1e-6:
+                return frame
+
+            # Maße des *aktuellen* Frames verwenden
+            h, w = frame.shape[:2]
+            scale = 1.0 + PULSE_ZOOM_MAX * inten
+            crop_w = max(1, int(round(w / scale)))
+            crop_h = max(1, int(round(h / scale)))
+
+            # zentrierte Crop-Box, strikt einklemmen
+            x1 = max(0, (w - crop_w) // 2)
+            y1 = max(0, (h - crop_h) // 2)
+            x2 = min(w, x1 + crop_w)
+            y2 = min(h, y1 + crop_h)
+            if x2 <= x1 or y2 <= y1:
+                return frame  # Sicherheitsnetz
+
+            # Slicing + contiguous machen (PIL liebt contiguous)
+            cropped = _np.ascontiguousarray(frame[y1:y2, x1:x2])
+
+            # Resize zurück auf die Original-Framegröße
+            img = Image.fromarray(cropped)
+            img = img.resize((w, h), resample=Image.BICUBIC)
+
+            # leichter Blur am Beat
+            blur_radius = PULSE_BLUR_MAX * inten
+            if blur_radius > 0.05:
+                img = img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+
+            return _np.array(img)
+
+        montage = montage.fl(_pulse_frame)
 
     # ----- Audio: normalize (+ optional denoise) -> (optional reverb) -> export stems -> mix with bg -----
     clip_audio = montage.audio
@@ -1293,6 +1365,7 @@ def parse_args(argv=None):
                    help="Während des Renderns Preview-JPGs schreiben (true/false, default: true).")
     p.add_argument("--triptych-carry", type=float, default=0.3,
                    help="Wahrscheinlichkeit (0.0–1.0), dass das Mittel-Panel des Triptychons vom Seiten-Panel des vorherigen übernommen wird (default: 0.3).")
+    p.add_argument("--pulse-effect", action="store_true", help="Beat-Pulse-Effekt aktivieren.")
     p.add_argument("--trim-large-clips", action="store_true", help="Lange Clips nur segmentweise nutzen (default: ganz verwenden).")
 
     args = p.parse_args(argv)
@@ -1381,6 +1454,7 @@ def main(argv=None):
         beat_mode=args.beat_mode,
         preview=args.preview,
         triptych_carry=args.triptych_carry,
+        pulse_effect=args.pulse_effect,
         trim_large_clips = args.trim_large_clips
     )
 
