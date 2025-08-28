@@ -736,6 +736,8 @@ def build_montage(
     fade_out_seconds: float,
     intro_path: Optional[Path],
     outro_path: Optional[Path],
+    contrast: float,
+    saturation: float,
 ):
     setup_tempfile_cleanup(out_path)
 
@@ -1151,6 +1153,21 @@ def build_montage(
     # Write output
     out_path.parent.mkdir(parents=True, exist_ok=True)
     try:
+        vf_parts = []
+
+        if abs(saturation - 1.0) > 1e-6:
+            vf_parts.append(f"saturation={saturation:.3f}")
+        if abs(contrast - 1.0) > 1e-6:
+            vf_parts.append(f"contrast={contrast:.3f}")
+
+        vf = None
+        if vf_parts:
+            vf = "eq=" + ":".join(vf_parts)
+
+        ffparams = []
+        if vf:
+            ffparams = ["-vf", vf]
+
         montage_with_preview.write_videofile(
             str(out_path),
             codec=codec,
@@ -1159,6 +1176,7 @@ def build_montage(
             preset=preset,
             bitrate=bitrate,
             threads=threads,
+            ffmpeg_params=ffparams,
         )
     finally:
         # Remove preview after finishing
@@ -1541,6 +1559,10 @@ def parse_args(argv=None):
     p.add_argument("--intro", type=Path, help="Optionaler Intro-Clip oder -Bild (wird vorangestellt).")
     p.add_argument("--outro", type=Path, help="Optionaler Outro-Clip oder -Bild (wird angehängt).")
 
+    p.add_argument("--contrast", type=float, default=1.0,
+                   help="Contrast (0.1–3.0, 1.0 = neutral)")
+    p.add_argument("--saturation", type=float, default=1.0,
+                   help="Saturation (0.0–3.0, 1.0 = neutral).")
     args = p.parse_args(argv)
 
     # --- Clamping & Sanitizing ---
@@ -1599,6 +1621,9 @@ def parse_args(argv=None):
 
     args.fade_out_seconds = clamp(args.fade_out_seconds, 0.0, 5.0)
 
+    args.contrast = clamp(args.contrast, 0.1, 3.0)
+    args.saturation = clamp(args.saturation, 0.0, 3.0)
+
     return args
 
 
@@ -1634,6 +1659,8 @@ def main(argv=None):
         fade_out_seconds=args.fade_out_seconds,
         intro_path=args.intro,
         outro_path=args.outro,
+        contrast=args.contrast,
+        saturation=args.saturation,
     )
 
 

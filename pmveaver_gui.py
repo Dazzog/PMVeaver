@@ -392,6 +392,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         # ----- Accordion (QToolBox) für alle restlichen Frames
         acc = QtWidgets.QToolBox()
         acc.addItem(self._panel_frame_render(), "Frame / Render")
+        acc.addItem(self._panel_effects(), "Filters / Effects")
         acc.addItem(self._panel_audio_mix(),    "Audio Mix")
         acc.addItem(self._panel_bpm(),          "BPM / Beat lengths")
         acc.addItem(self._panel_time_fallback(),"Time-based fallback (when BPM disabled)")
@@ -466,8 +467,63 @@ class PMVeaverQt(QtWidgets.QWidget):
         g.addWidget(lab_f, 1, 2);
         g.addWidget(self.sb_fps, 1, 3)
 
+        # alle drei Spinbox-Spalten gleich stretchen
+        for col in (1, 3):
+            g.setColumnStretch(col, 1)
+        # Labels schmal halten
+        for col in (0, 2):
+            g.setColumnMinimumWidth(col, 80)
+
+        return w
+
+    def _panel_effects(self):
+        w = QtWidgets.QWidget()
+        w.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
+        g = QtWidgets.QGridLayout(w)
+        g.setSpacing(16)
+
+        # Slider (intern 0..200 bzw. 0..100)
+        def slider(init, to=300):
+            s = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+            s.setRange(0, to)
+            s.setValue(init)
+            return s
+
+        self.sl_contrast = slider(100)
+        self.sl_saturation = slider(100)
+
+        # Editierbare Zahlenfelder (anzeigen + tippen erlaubt)
+        def dspin(minv, maxv, init, step=1, suffix="%"):
+            ds = QtWidgets.QDoubleSpinBox()
+            ds.setRange(minv, maxv)
+            ds.setDecimals(0)
+            ds.setSingleStep(step)
+            ds.setValue(init)
+            ds.setSuffix(suffix)
+            ds.setFixedWidth(72)
+            return ds
+
+        self.ds_contrast = dspin(0, 300, 100)
+        self.ds_saturation = dspin(0, 300, 100)
+
+        # Bidirektionale Verdrahtung (Slider <-> SpinBox)
+        self.sl_contrast.valueChanged.connect(lambda v: self.ds_contrast.setValue(v))
+        self.ds_contrast.valueChanged.connect(lambda val: self.sl_contrast.setValue(int(round(val))))
+
+        self.sl_saturation.valueChanged.connect(lambda v: self.ds_saturation.setValue(v))
+        self.ds_saturation.valueChanged.connect(lambda val: self.sl_saturation.setValue(int(round(val))))
+
+        # Layout: [Label | Slider | Zahl] x 3 – Slider-Spalten gleich stretchen
+        g.addWidget(QtWidgets.QLabel("Contrast"), 0, 0)
+        g.addWidget(self.sl_contrast, 0, 1, 1, 3)
+        g.addWidget(self.ds_contrast, 0, 4)
+
+        g.addWidget(QtWidgets.QLabel("Saturation"), 1, 0)
+        g.addWidget(self.sl_saturation, 1, 1, 1, 3)
+        g.addWidget(self.ds_saturation, 1, 4)
+
         self.chk_pulse = QtWidgets.QCheckBox("Beat pulse effect")
-        g.addWidget(self.chk_pulse, 2, 0, 1, 2)
+        g.addWidget(self.chk_pulse, 3, 0, 1, 2)
 
         lab_fadeout = QtWidgets.QLabel("Fade out")
         lab_fadeout.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
@@ -476,8 +532,8 @@ class PMVeaverQt(QtWidgets.QWidget):
         self.ds_fadeout.setDecimals(2)
         self.ds_fadeout.setSingleStep(0.10)
         self.ds_fadeout.setSuffix(" s")
-        g.addWidget(lab_fadeout, 2, 2)
-        g.addWidget(self.ds_fadeout, 2, 3)
+        g.addWidget(lab_fadeout, 3, 3)
+        g.addWidget(self.ds_fadeout, 3, 4)
 
         # alle drei Spinbox-Spalten gleich stretchen
         for col in (1, 3):
@@ -1268,7 +1324,9 @@ class PMVeaverQt(QtWidgets.QWidget):
             "--clip-reverb", f"{self.sl_rev.value() / 100.0:.2f}",
             "--codec", self.cb_codec.currentText(),
             "--audio-codec", self.cb_audio.currentText(),
-            "--triptych-carry", str(self.ds_triptych_carry.value() / 100.0)
+            "--triptych-carry", str(self.ds_triptych_carry.value() / 100.0),
+            "--contrast", f"{self.sl_contrast.value() / 100.0:.2f}",
+            "--saturation", f"{self.sl_saturation.value() / 100.0:.2f}",
         ]
 
         if self.cb_preset.isEnabled() and self.cb_preset.currentText():
