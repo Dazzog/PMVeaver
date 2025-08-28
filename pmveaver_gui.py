@@ -5,6 +5,8 @@ from pathlib import Path
 from PySide6 import QtCore, QtGui, QtWidgets
 import qdarktheme
 
+__version__ = "1.0.0"
+
 APP_TITLE = "PMVeaver"
 
 # Progress-Gewichte
@@ -224,7 +226,13 @@ class PMVeaverQt(QtWidgets.QWidget):
     def _build_ui(self):
         root = QtWidgets.QVBoxLayout(self)
 
-        # ----- Sources / Output (separat, NICHT im Accordion)
+        main_split = QtWidgets.QHBoxLayout()
+        root.addLayout(main_split, stretch=1)
+        main_split.addSpacing(16)
+
+        left_box = QtWidgets.QVBoxLayout()
+
+        # ----- Sources / Output
         src_group = QtWidgets.QGroupBox("Sources / Output")
         src_form = QtWidgets.QGridLayout(src_group)
 
@@ -260,17 +268,9 @@ class PMVeaverQt(QtWidgets.QWidget):
         src_form.addWidget(QtWidgets.QLabel("Output file:"),  3, 0)
         src_form.addWidget(self.ed_output,                    3, 1)
         src_form.addWidget(btn_output,                        3, 2)
-        src_form.setColumnStretch(1, 1)
-        root.addWidget(src_group)
+        left_box.addWidget(src_group)
 
-        # ----- Accordion (QToolBox) für alle restlichen Frames
-        acc = QtWidgets.QToolBox()
-        acc.addItem(self._panel_frame_render(), "Frame / Render")
-        acc.addItem(self._panel_audio_mix(),    "Audio Mix")
-        acc.addItem(self._panel_bpm(),          "BPM / Beat lengths")
-        acc.addItem(self._panel_time_fallback(),"Time-based fallback (when BPM disabled)")
-        acc.addItem(self._panel_codecs(),       "Codecs / Performance")
-        root.addWidget(acc)
+        left_box.addStretch(1)
 
         # ----- Progress
         prog_group = QtWidgets.QGroupBox("Progress")
@@ -330,11 +330,10 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         pg.addLayout(right_box)
 
-        root.addWidget(prog_group)
+        left_box.addWidget(prog_group)
 
         # ----- Buttons + FFmpeg-Status
         btn_row = QtWidgets.QHBoxLayout()
-        btn_row.setSpacing(12)
         btn_row.setContentsMargins(0, 8, 0, 0)
 
         self.btn_start = QtWidgets.QPushButton("Start")
@@ -370,10 +369,29 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         self.lbl_ffmpeg = QtWidgets.QLabel("FFmpeg: …")
         btn_row.addWidget(self.lbl_ffmpeg)
-        root.addLayout(btn_row)
+        left_box.addLayout(btn_row)
+
+        main_split.addLayout(left_box, stretch=3)
+        main_split.addSpacing(16)
+
+        # ----- Accordion (QToolBox) für alle restlichen Frames
+        acc = QtWidgets.QToolBox()
+        acc.addItem(self._panel_frame_render(), "Frame / Render")
+        acc.addItem(self._panel_audio_mix(),    "Audio Mix")
+        acc.addItem(self._panel_bpm(),          "BPM / Beat lengths")
+        acc.addItem(self._panel_time_fallback(),"Time-based fallback (when BPM disabled)")
+        acc.addItem(self._panel_codecs(),       "Codecs / Performance")
+
+        acc_container = QtWidgets.QWidget()
+        acc_layout = QtWidgets.QVBoxLayout(acc_container)
+        acc_layout.setContentsMargins(8, 8, 8, 8)
+        acc_layout.addWidget(acc)
+
+        main_split.addWidget(acc_container, stretch=2)
 
         # Auto-Größe
-        self.resize(640, 800)
+        self.resize(1360, 640)
+        self.setMinimumWidth(1360)
 
         self._check_ffmpeg()
 
@@ -386,21 +404,23 @@ class PMVeaverQt(QtWidgets.QWidget):
 
     # ----------------- Panels -----------------
     def _panel_frame_render(self):
-        w = QtWidgets.QWidget();
+        w = QtWidgets.QWidget()
+        w.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
         g = QtWidgets.QGridLayout(w)
+        g.setSpacing(16)
 
-        self.sb_w = QtWidgets.QSpinBox();
-        self.sb_w.setRange(16, 16384);
-        self.sb_w.setValue(1920);
+        self.sb_w = QtWidgets.QSpinBox()
+        self.sb_w.setRange(16, 16384)
+        self.sb_w.setValue(1920)
         self.sb_w.setSuffix(" px")
-        self.sb_h = QtWidgets.QSpinBox();
-        self.sb_h.setRange(16, 16384);
-        self.sb_h.setValue(1080);
+        self.sb_h = QtWidgets.QSpinBox()
+        self.sb_h.setRange(16, 16384)
+        self.sb_h.setValue(1080)
         self.sb_h.setSuffix(" px")
-        self.sb_fps = QtWidgets.QDoubleSpinBox();
-        self.sb_fps.setDecimals(2);
-        self.sb_fps.setRange(1.0, 240.0);
-        self.sb_fps.setValue(30.0);
+        self.sb_fps = QtWidgets.QDoubleSpinBox()
+        self.sb_fps.setDecimals(2)
+        self.sb_fps.setRange(1.0, 240.0)
+        self.sb_fps.setValue(30.0)
         self.sb_fps.setSuffix(" fps")
 
         # Alle drei gleichmäßig dehnbar machen
@@ -455,7 +475,9 @@ class PMVeaverQt(QtWidgets.QWidget):
 
     def _panel_audio_mix(self):
         w = QtWidgets.QWidget()
+        w.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
         g = QtWidgets.QGridLayout(w)
+        g.setSpacing(16)
 
         # Slider (intern 0..200 bzw. 0..100)
         def slider(init, to=200):
@@ -513,8 +535,7 @@ class PMVeaverQt(QtWidgets.QWidget):
     def _panel_bpm(self):
         w = QtWidgets.QWidget()
         g = QtWidgets.QGridLayout(w)
-
-        g.setVerticalSpacing(12)
+        g.setSpacing(16)
 
         self.chk_bpm = QtWidgets.QCheckBox("Automatically detect BPM (librosa)")
         self.chk_bpm.setChecked(True)
@@ -598,7 +619,9 @@ class PMVeaverQt(QtWidgets.QWidget):
 
     def _panel_time_fallback(self):
         w = QtWidgets.QWidget();
+        w.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
         g = QtWidgets.QGridLayout(w)
+        g.setSpacing(16)
 
         self.ds_min_seconds = QtWidgets.QDoubleSpinBox()
         self.ds_min_seconds.setRange(0.10, 60.0)
@@ -646,7 +669,11 @@ class PMVeaverQt(QtWidgets.QWidget):
         return w
 
     def _panel_codecs(self):
-        w = QtWidgets.QWidget(); g = QtWidgets.QGridLayout(w)
+        w = QtWidgets.QWidget()
+        w.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
+        g = QtWidgets.QGridLayout(w)
+        g.setSpacing(16)
+
         self.cb_profile = QtWidgets.QComboBox(); self.cb_profile.addItems(list(RENDER_PROFILES.keys()))
         self.cb_codec   = QtWidgets.QComboBox(); self.cb_codec.addItems(list(CODEC_PRESETS.keys()))
         self.cb_audio   = QtWidgets.QComboBox(); self.cb_audio.addItems(["aac","libopus","libmp3lame"])
@@ -660,13 +687,16 @@ class PMVeaverQt(QtWidgets.QWidget):
         self.cb_codec.currentIndexChanged.connect(self._sync_preset_choices)
 
         g.addWidget(QtWidgets.QLabel("Hardware profile"), 0,0); g.addWidget(self.cb_profile, 0,1)
+
         g.addWidget(QtWidgets.QLabel("Video codec"),      1,0); g.addWidget(self.cb_codec,   1,1)
         g.addWidget(QtWidgets.QLabel("Audio codec"),      1,2); g.addWidget(self.cb_audio,   1,3)
-        g.addWidget(QtWidgets.QLabel("Codec Preset"),     1,4); g.addWidget(self.cb_preset,  1,5)
 
-        g.addWidget(QtWidgets.QLabel("Bitrate"),          2,0); g.addWidget(self.ed_bitrate, 2,1)
-        g.addWidget(QtWidgets.QLabel("Threads"),          2,2); g.addWidget(self.ed_threads, 2,3)
-        g.addWidget(self.chk_preview,                     3,0,1,2)
+        g.addWidget(QtWidgets.QLabel("Codec Preset"),     2,0); g.addWidget(self.cb_preset,  2,1)
+
+        g.addWidget(QtWidgets.QLabel("Bitrate"),          3,0); g.addWidget(self.ed_bitrate, 3,1)
+        g.addWidget(QtWidgets.QLabel("Threads"),          3,2); g.addWidget(self.ed_threads, 3,3)
+
+        g.addWidget(self.chk_preview,                     4,0,1,2)
         g.setColumnStretch(5,1)
         return w
 
