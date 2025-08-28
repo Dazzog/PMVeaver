@@ -233,7 +233,7 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         self.ed_output = QtWidgets.QLineEdit()
 
-        src_form.addWidget(QtWidgets.QLabel("Video folders:"), 1, 0)
+        src_form.addWidget(QtWidgets.QLabel("Source folders:"), 1, 0)
         self.videos_container = QtWidgets.QWidget()
         self.videos_layout = QtWidgets.QVBoxLayout(self.videos_container)
         self.videos_layout.setContentsMargins(0, 0, 0, 0)
@@ -433,6 +433,16 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         self.chk_pulse = QtWidgets.QCheckBox("Beat pulse effect")
         g.addWidget(self.chk_pulse, 2, 0, 1, 2)
+
+        lab_fadeout = QtWidgets.QLabel("Fade out")
+        lab_fadeout.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        self.ds_fadeout = QtWidgets.QDoubleSpinBox()
+        self.ds_fadeout.setRange(0, 5.0)
+        self.ds_fadeout.setDecimals(2)
+        self.ds_fadeout.setSingleStep(0.10)
+        self.ds_fadeout.setSuffix(" s")
+        g.addWidget(lab_fadeout, 2, 2)
+        g.addWidget(self.ds_fadeout, 2, 3)
 
         # alle drei Spinbox-Spalten gleich stretchen
         for col in (1, 3):
@@ -1236,6 +1246,8 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         if self.chk_pulse.isChecked(): args += ["--pulse-effect"]
         if self.chk_trim.isChecked(): args += ["--trim-large-clips"]
+
+        if self.ds_fadeout.value() > 0: args += ["--fade-out-seconds", f"{self.ds_fadeout.value():.2f}"]
 
         return args
 

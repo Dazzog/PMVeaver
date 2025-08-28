@@ -715,6 +715,7 @@ def build_montage(
     triptych_carry: float,
     trim_large_clips: bool,
     pulse_effect: bool,
+    fade_out_seconds: float,
 ):
     setup_tempfile_cleanup(out_path)
 
@@ -1035,6 +1036,18 @@ def build_montage(
         composite_audio = bg_track
 
     montage = montage.set_audio(composite_audio)
+
+    # --- Optionales Fade-Out am Ende ---
+    fade_s = max(0.0, min(float(fade_out_seconds or 0.0), max(0.0, target_duration - 0.05)))
+    if fade_s >= 0.05:
+        try:
+            montage = montage.fx(vfx.fadeout, fade_s)
+        except Exception:
+            pass
+        try:
+            montage = montage.audio_fadeout(fade_s)
+        except Exception:
+            pass
 
     # --- Live preview via frame pipeline: save every 5 seconds to a constant file
     preview_path = out_path.parent / f"{out_path.stem}.preview.jpg"
@@ -1477,6 +1490,7 @@ def parse_args(argv=None):
                    help="Wahrscheinlichkeit (0.0–1.0), dass das Mittel-Panel des Triptychons vom Seiten-Panel des vorherigen übernommen wird (default: 0.3).")
     p.add_argument("--pulse-effect", action="store_true", help="Beat-Pulse-Effekt aktivieren.")
     p.add_argument("--trim-large-clips", action="store_true", help="Lange Clips nur segmentweise nutzen (default: ganz verwenden).")
+    p.add_argument("--fade-out-seconds", type=float, default=0.0, help="Länge des Video-/Audio-Fade-Outs am Ende (Sekunden, 0=aus).")
 
     args = p.parse_args(argv)
 
@@ -1534,6 +1548,8 @@ def parse_args(argv=None):
 
     args.triptych_carry = max(0.0, min(1.0, args.triptych_carry))
 
+    args.fade_out_seconds = clamp(args.fade_out_seconds, 0.0, 5.0)
+
     return args
 
 
@@ -1565,7 +1581,8 @@ def main(argv=None):
         preview=args.preview,
         triptych_carry=args.triptych_carry,
         pulse_effect=args.pulse_effect,
-        trim_large_clips = args.trim_large_clips
+        trim_large_clips = args.trim_large_clips,
+        fade_out_seconds=args.fade_out_seconds,
     )
 
 
