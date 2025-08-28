@@ -75,7 +75,6 @@ def hms(seconds: float) -> str:
     h, rem = divmod(s, 3600); m, s = divmod(rem, 60)
     return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
-# --- In pmveaver_gui.py, z.B. oberhalb von PMVeaverQt hinzufügen ---
 class TriangularDistWidget(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -509,9 +508,13 @@ class PMVeaverQt(QtWidgets.QWidget):
         # Bidirektionale Verdrahtung (Slider <-> SpinBox)
         self.sl_contrast.valueChanged.connect(lambda v: self.ds_contrast.setValue(v))
         self.ds_contrast.valueChanged.connect(lambda val: self.sl_contrast.setValue(int(round(val))))
+        self.sl_contrast.valueChanged.connect(lambda _: self._update_lut_preview())
+        self.ds_contrast.valueChanged.connect(lambda _: self._update_lut_preview())
 
         self.sl_saturation.valueChanged.connect(lambda v: self.ds_saturation.setValue(v))
         self.ds_saturation.valueChanged.connect(lambda val: self.sl_saturation.setValue(int(round(val))))
+        self.sl_saturation.valueChanged.connect(lambda _: self._update_lut_preview())
+        self.ds_saturation.valueChanged.connect(lambda _: self._update_lut_preview())
 
         # Layout: [Label | Slider | Zahl] x 3 – Slider-Spalten gleich stretchen
         g.addWidget(QtWidgets.QLabel("Contrast"), 0, 0)
@@ -521,6 +524,18 @@ class PMVeaverQt(QtWidgets.QWidget):
         g.addWidget(QtWidgets.QLabel("Saturation"), 1, 0)
         g.addWidget(self.sl_saturation, 1, 1, 1, 3)
         g.addWidget(self.ds_saturation, 1, 4)
+
+        # --- 3D LUT Auswahl ---
+        self.cb_lut = QtWidgets.QComboBox()
+        btn_lut_reload = QtWidgets.QPushButton("Reload")
+        btn_lut_reload.setCursor(QtCore.Qt.PointingHandCursor)
+
+        g.addWidget(QtWidgets.QLabel("3D LUT"), 2, 0)
+        g.addWidget(self.cb_lut, 2, 1, 1, 3)
+        g.addWidget(btn_lut_reload, 2, 4)
+
+        btn_lut_reload.clicked.connect(lambda: (self._scan_luts(), self._update_lut_preview()))
+        QtCore.QTimer.singleShot(0, self._scan_luts)  # initial befüllen, wenn UI steht
 
         self.chk_pulse = QtWidgets.QCheckBox("Beat pulse effect")
         g.addWidget(self.chk_pulse, 3, 0, 1, 2)
@@ -534,6 +549,20 @@ class PMVeaverQt(QtWidgets.QWidget):
         self.ds_fadeout.setSuffix(" s")
         g.addWidget(lab_fadeout, 3, 3)
         g.addWidget(self.ds_fadeout, 3, 4)
+
+        # --- LUT Preview (kleine Live-Vorschau) ---
+        self.lbl_lut_preview = QtWidgets.QLabel()
+        self.lbl_lut_preview.setFixedSize(384, 107)  # wie deine Render-Preview
+        self.lbl_lut_preview.setFrameShape(QtWidgets.QFrame.Panel)
+        self.lbl_lut_preview.setFrameShadow(QtWidgets.QFrame.Sunken)
+        self.lbl_lut_preview.setAlignment(QtCore.Qt.AlignCenter)
+        g.addWidget(QtWidgets.QLabel("Preview"), 5, 0)
+        g.addWidget(self.lbl_lut_preview, 5, 1, 1, 4)
+
+        # Signale
+        self.cb_lut.currentIndexChanged.connect(self._update_lut_preview)
+        QtCore.QTimer.singleShot(0, self._scan_luts)  # Liste initial befüllen
+        QtCore.QTimer.singleShot(50, self._update_lut_preview)  # und gleich eine Preview zeigen
 
         # alle drei Spinbox-Spalten gleich stretchen
         for col in (1, 3):
@@ -1305,6 +1334,190 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         self._validate_inputs(False)
 
+    def _scan_luts(self):
+        """Listen ./luts/ im Arbeitsverzeichnis und fülle die LUT-Auswahl."""
+        lut_dir = Path(_norm(os.path.join(os.getcwd(), "luts")))
+        items: list[str] = []
+
+        if lut_dir.exists() and lut_dir.is_dir():
+            exts = [".cube", ".3dl", ".lut"]
+            # Alle gewünschten Endungen einsammeln
+            for ext in exts:
+                for p in sorted(lut_dir.glob(f"*{ext}")):
+                    if p.is_file():
+                        items.append(str(p))
+
+        # Combo neu befüllen
+        self.cb_lut.clear()
+        self.cb_lut.addItem("(none)")
+        for it in items:
+            name = os.path.basename(it)
+            self.cb_lut.addItem(name, it)
+
+        # Hilfreiche Hinweise
+        tip = "3D-LUTs werden aus dem Unterordner ./luts des Arbeitsverzeichnisses geladen."
+        if not items:
+            tip += " (Keine Dateien gefunden – unterstützte Endungen: .cube, .3dl, .lut)"
+        self.cb_lut.setToolTip(tip)
+
+    def _lut_sample_path(self) -> str:
+        """Erzeuge einmal ein farbiges Testbild (PNG) für LUT-Vorschauen und liefere den Pfad."""
+        if hasattr(self, "_lut_sample_file") and self._lut_sample_file and Path(self._lut_sample_file).exists():
+            return self._lut_sample_file
+
+        tmp = Path(os.path.join(Path.cwd(), ".pmveaver_cache"))
+        tmp.mkdir(exist_ok=True)
+        p = tmp / "lut_sample.png"
+
+        # 256x144, Farbfelder + Gradienten
+        w, h = 384, 107
+        img = QtGui.QImage(w, h, QtGui.QImage.Format_RGB32)
+        painter = QtGui.QPainter(img)
+
+        # 1) Farb-Grid (oben)
+        cell_w, cell_h = w // 8, h // 3
+        for i in range(8):
+            for j in range(1):
+                r = int(255 * (i / 7))
+                g = int(255 * (j / 2))
+                b = int(255 * ((7 - i) / 7))
+                painter.fillRect(i * cell_w, j * cell_h, cell_w, cell_h, QtGui.QColor(r, g, b))
+
+        # 2) Horizontaler RGB-Gradient (Mitte)
+        y0 = cell_h
+        for x in range(w):
+            t = x / (w - 1)
+            color = QtGui.QColor(int(255 * t), int(255 * (1 - t)), int(255 * (0.5 + 0.5 * t)))
+            painter.setPen(color)
+            painter.drawLine(x, y0, x, y0 + cell_h - 1)
+
+        # 3) Sättigungs-Gradient (unten)
+        y1 = 2 * cell_h
+        for y in range(cell_h):
+            sat = y / max(1, cell_h - 1)
+            for x in range(w):
+                hue = x / max(1, w - 1)
+                qc = QtGui.QColor.fromHsvF(hue, sat, 1.0)
+                painter.setPen(qc)
+                painter.drawPoint(x, y1 + y)
+
+        painter.end()
+        img.save(str(p), "PNG", quality=95)
+        self._lut_sample_file = str(p)
+        return self._lut_sample_file
+
+    def _lut_samples(self) -> list[str]:
+        grid = self._lut_sample_path()
+        paths = [grid] if grid else []
+
+        photo = Path(Path.cwd() / "sample.jpg")
+        if photo.exists():
+            paths.insert(0, str(photo))
+        return paths
+
+    def _update_lut_preview(self):
+        """Erzeugt eine LUT-Preview als Collage (Foto + Farbgrid) via FFmpeg und zeigt sie an."""
+        # --- Quellen besorgen ---
+        try:
+            samples = self._lut_samples()  # optional: Foto + Grid
+        except AttributeError:
+            samples = [self._lut_sample_path()]  # nur Grid
+
+        samples = [s for s in samples if s and Path(s).exists()]
+        if not samples:
+            self.lbl_lut_preview.setText("No sample")
+            return
+
+        # --- FFmpeg suchen ---
+        ffm, _ = self._which_ffmpeg_bins()
+        if not ffm:
+            self.lbl_lut_preview.setText("FFmpeg not found")
+            return
+
+        # --- LUT-Auswahl prüfen ---
+        use_lut = False
+        lut_esc = ""
+        if hasattr(self, "cb_lut"):
+            idx = self.cb_lut.currentIndex()
+            if idx > 0:
+                lut_path = str(self.cb_lut.itemData(idx) or "").strip()
+                if lut_path:
+                    lut_esc = lut_path.replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
+                    use_lut = True
+
+        # --- Contrast / Saturation aus GUI ---
+        contrast = getattr(self, "ds_contrast", None).value() / 100.0 if hasattr(self, "ds_contrast") else 1.0
+        saturation = getattr(self, "ds_saturation", None).value() / 100.0 if hasattr(self, "ds_saturation") else 1.0
+        eq_filter = f",eq=contrast={contrast:.2f}:saturation={saturation:.2f}"
+
+        # --- Ziel & Größe ---
+        out_dir = Path(os.path.join(Path.cwd(), ".pmveaver_cache"))
+        out_dir.mkdir(exist_ok=True)
+        out_png = out_dir / "lut_preview.png"
+        tile_w, tile_h = 256, 144
+
+        # --- FFmpeg-Argumente vorbereiten ---
+        args = ["-y", "-hide_banner", "-nostats", "-loglevel", "error"]
+        for s in samples:
+            args += ["-i", s]
+
+        chains = []
+        outs = []
+        for i in range(len(samples)):
+            if use_lut:
+                chain = (
+                    f"[{i}:v]"
+                    f"format=gbrp,"
+                    f"lut3d=file='{lut_esc}':interp=tetrahedral,"
+                    f"format=rgb24,"
+                    f"eq=contrast={contrast:.2f}:saturation={saturation:.2f},"
+                    f"scale={tile_w}:{tile_h}:flags=bicubic"
+                    f"[v{i}]"
+                )
+            else:
+                chain = (
+                    f"[{i}:v]"
+                    f"format=rgb24,"
+                    f"eq=contrast={contrast:.2f}:saturation={saturation:.2f},"
+                    f"scale={tile_w}:{tile_h}:flags=bicubic"
+                    f"[v{i}]"
+                )
+            chains.append(chain)
+            outs.append(f"[v{i}]")
+
+        fc = ";".join(chains) + ";" + "".join(outs) + f"hstack=inputs={len(samples)}[out]"
+        args += ["-filter_complex", fc, "-map", "[out]", "-frames:v", "1", str(out_png)]
+
+        # --- Vorherige Preview-Jobs abbrechen ---
+        if hasattr(self, "_lut_prev_proc") and self._lut_prev_proc:
+            try:
+                self._lut_prev_proc.kill()
+            except Exception:
+                pass
+            try:
+                self._lut_prev_proc.deleteLater()
+            except Exception:
+                pass
+
+        # --- QProcess starten ---
+        self._lut_prev_proc = QtCore.QProcess(self)
+        self._lut_prev_proc.finished.connect(lambda *_: self._on_lut_preview_done(str(out_png)))
+        self._lut_prev_proc.setProgram(ffm)
+        self._lut_prev_proc.setArguments(args)
+
+        self.lbl_lut_preview.setText("rendering…")
+        self._lut_prev_proc.start()
+
+    def _on_lut_preview_done(self, out_png: str):
+        p = Path(out_png)
+        if p.exists():
+            pix = QtGui.QPixmap(str(p)).scaled(self.lbl_lut_preview.size(),
+                                               QtCore.Qt.KeepAspectRatio,
+                                               QtCore.Qt.SmoothTransformation)
+            self.lbl_lut_preview.setPixmap(pix)
+        else:
+            self.lbl_lut_preview.setText("preview failed")
+
     def _build_args(self) -> list[str]:
         audio = _norm(self.ed_audio.text())
         videos = self._build_videos_arg()
@@ -1368,10 +1581,24 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         if self.ds_fadeout.value() > 0: args += ["--fade-out-seconds", f"{self.ds_fadeout.value():.2f}"]
 
-        intro = _norm(self.ed_intro.text())
-        if intro: args += ["--intro", intro]
-        outro = _norm(self.ed_outro.text())
-        if outro: args += ["--outro", outro]
+        intro_txt = self.ed_intro.text().strip()
+        if intro_txt:
+            intro_path = _norm(intro_txt)
+            if Path(intro_path).is_file():
+                args += ["--intro", intro_path]
+
+        outro_txt = self.ed_outro.text().strip()
+        if outro_txt:
+            outro_path = _norm(outro_txt)
+            if Path(outro_path).is_file():
+                args += ["--outro", outro_path]
+
+        if hasattr(self, "cb_lut"):
+            idx = self.cb_lut.currentIndex()
+            if idx > 0:  # 0 = "(none)"
+                lut_path = self.cb_lut.itemData(idx)
+                if lut_path:
+                    args += ["--lut", _norm(lut_path)]
 
         return args
 

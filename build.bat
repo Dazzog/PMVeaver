@@ -23,6 +23,8 @@ python -m PyInstaller -y --clean --log-level=WARN pmveaver_gui.spec   || goto :e
 REM --- ffmpeg/ffprobe ins dist kopieren ---
 copy /Y ffmpeg.exe  dist
 copy /Y ffprobe.exe dist
+copy /Y sample.jpg dist
+xcopy luts dist\luts /E /I /H /C /Y
 
 echo.
 echo [OK] Build fertig. EXEs liegen in .\dist\

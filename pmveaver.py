@@ -704,6 +704,35 @@ def _load_intro_outro_clip(path: Path, target_w: int, target_h: int, fps: float,
     v = cover_scale_and_crop(v, target_w, target_h).set_fps(fps)
     return v
 
+def _build_vf_graph(contrast: float, saturation: float, lut: Optional[Path]) -> Optional[str]:
+    """
+    Baut den FFmpeg-Filtergraph identisch zu dem beim finalen Rendern genutzten.
+    Reihenfolge:
+      - optional: RGB-Format (für genauere LUT)
+      - optional: LUT 3D
+      - optional: eq (saturation/contrast)
+    """
+    graph_parts = []
+
+    if lut:
+        lut_path = str(lut)
+        # robust für FFmpeg-Filter-Args:
+        lut_path = lut_path.replace("\\", "/")  # Windows: Backslashes → Slashes
+        lut_path = lut_path.replace(":", r"\:")  # Drive-Colon escapen (C:\ → C\:/)
+        lut_path = lut_path.replace("'", r"\'")  # Quotes escapen
+
+        # In RGB arbeiten (genauer für LUTs), danach encodiert ffmpeg wieder in YUV
+        graph_parts.append(f"format=gbrp,lut3d=file='{lut_path}':interp=tetrahedral")
+
+    eq_parts = []
+    if abs(saturation - 1.0) > 1e-6:
+        eq_parts.append(f"saturation={saturation:.3f}")
+    if abs(contrast - 1.0) > 1e-6:
+        eq_parts.append(f"contrast={contrast:.3f}")
+    if eq_parts:
+        graph_parts.append("eq=" + ":".join(eq_parts))
+
+    return ",".join(graph_parts) if graph_parts else None
 
 # ---------------- main build ----------------
 
@@ -738,6 +767,7 @@ def build_montage(
     outro_path: Optional[Path],
     contrast: float,
     saturation: float,
+    lut: Optional[Path],
 ):
     setup_tempfile_cleanup(out_path)
 
@@ -1098,6 +1128,8 @@ def build_montage(
         except Exception:
             pass
 
+    vf_graph = _build_vf_graph(contrast, saturation, lut)
+
     # --- Live preview via frame pipeline: save every 5 seconds to a constant file
     preview_path = out_path.parent / f"{out_path.stem}.preview.jpg"
 
@@ -1110,38 +1142,53 @@ def build_montage(
         last_ts = now
 
         try:
-            # Ensure we have a uint8 RGB array
+            # 1) Frame temporär als PNG schreiben (verlustarm, schnell)
             if isinstance(frame, np.ndarray):
-                arr = frame
-                if arr.dtype != np.uint8:
-                    arr = arr.astype(np.uint8, copy=False)
+                arr = frame.astype(np.uint8, copy=False)
                 img = _PIL_Image.fromarray(arr)
             else:
                 img = _PIL_Image.fromarray(np.asarray(frame, dtype=np.uint8))
 
-            # Fit to bounding box 180x100 (no upscaling)
-            max_w, max_h = 180, 100
-            w, h = img.size
-            scale = min(1.0, max_w / w, max_h / h)
-            if scale < 1.0:
-                new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
-                # BICUBIC ist schneller als LANCZOS und für Preview gut genug
-                img = img.resize(new_size, resample=_PIL_Image.BICUBIC)
+            tmp_dir = tempfile.mkdtemp(prefix="pmv_preview_")
+            src_png = os.path.join(tmp_dir, "frame.png")
+            img.save(src_png, format="PNG", optimize=False)
 
-            # Write atomically: first .tmp, then os.replace
-            tmp_path = str(preview_path) + ".tmp"
-            img.save(
-                tmp_path,
-                format="JPEG",
-                quality=85,
-                optimize=True,
-                progressive=True,
-                subsampling=2
-            )
-            os.replace(tmp_path, str(preview_path))
-        except Exception:
-            # No hard error message in the render loop
-            pass
+            # 2) FFmpeg mit *demselben* Filtergraph wie fürs finale Video
+            #    + kleines Downscale auf max 180x100 (Seitenverhältnis erhalten)
+            #    -update 1: immer dieselbe Datei überschreiben
+            exe = _ffmpeg_path_or_raise()
+            scale_expr = "scale='if(gt(a,1.8),180,-2)':'if(gt(a,1.8),-2,100)'"
+            vf_parts = []
+            if vf_graph:
+                vf_parts.append(vf_graph)
+            vf_parts.append(scale_expr)
+            vf_for_preview = ",".join(vf_parts)
+
+            tmp_out = str(preview_path) + ".tmp.jpg"
+            cmd = [
+                exe, "-y", "-hide_banner", "-loglevel", "error",
+                "-i", src_png,
+                "-vf", vf_for_preview,
+                "-frames:v", "1",
+                "-q:v", "3",  # ordentliche Qualität
+                tmp_out
+            ]
+            # Wir schreiben atomar: erst tmp, dann replace
+            subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                os.replace(tmp_out, str(preview_path))
+            except (PermissionError, FileNotFoundError):
+                # Datei gerade gelockt oder tmp nicht erzeugt → Preview für diesen Tick überspringen
+                try:
+                    if os.path.exists(tmp_out):
+                        os.remove(tmp_out)
+                except Exception:
+                    pass
+        finally:
+            try:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
 
         return frame
 
@@ -1153,20 +1200,11 @@ def build_montage(
     # Write output
     out_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        vf_parts = []
-
-        if abs(saturation - 1.0) > 1e-6:
-            vf_parts.append(f"saturation={saturation:.3f}")
-        if abs(contrast - 1.0) > 1e-6:
-            vf_parts.append(f"contrast={contrast:.3f}")
-
-        vf = None
-        if vf_parts:
-            vf = "eq=" + ":".join(vf_parts)
-
         ffparams = []
-        if vf:
-            ffparams = ["-vf", vf]
+        if vf_graph:
+            ffparams += ["-vf", vf_graph]
+            # Für breite Player-Kompatibilität (besonders bei LUTs) 8-bit YUV ausgeben:
+            ffparams += ["-pix_fmt", "yuv420p"]
 
         montage_with_preview.write_videofile(
             str(out_path),
@@ -1306,8 +1344,6 @@ def _parse_videos_spec(spec: str) -> List[Tuple[Path, int]]:
     p0 = Path(spec).expanduser()
     if p0.is_dir():
         out_single = [(p0, 1)]
-        print("CLI> Parsed --videos entries (single):")
-        print(f"  {p0} (weight=1)")
         return out_single
 
     out: List[Tuple[Path, int]] = []
@@ -1563,6 +1599,8 @@ def parse_args(argv=None):
                    help="Contrast (0.1–3.0, 1.0 = neutral)")
     p.add_argument("--saturation", type=float, default=1.0,
                    help="Saturation (0.0–3.0, 1.0 = neutral).")
+    p.add_argument("--lut", type=Path, help="Optional LUT file.")
+
     args = p.parse_args(argv)
 
     # --- Clamping & Sanitizing ---
@@ -1661,6 +1699,7 @@ def main(argv=None):
         outro_path=args.outro,
         contrast=args.contrast,
         saturation=args.saturation,
+        lut=args.lut,
     )
 
 
