@@ -63,6 +63,7 @@ from typing import Dict, List, Optional, Tuple, Set
 from moviepy.editor import (
     VideoFileClip,
     AudioFileClip,
+    ImageClip,
     concatenate_videoclips,
     CompositeVideoClip,
     CompositeAudioClip,
@@ -73,7 +74,9 @@ from PIL import Image as _PIL_Image
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-SUPPORTED_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".mpg", ".gif"}
+VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".mpg", ".gif"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+SUPPORTED_EXTS = VIDEO_EXTS | IMAGE_EXTS
 
 PREVIEW_INTERVAL = 5.0
 
@@ -183,15 +186,26 @@ def ffprobe_video_info(path: Path) -> ProbeInfo:
 
     return ProbeInfo(width=width, height=height, rotation=rotation, duration=dur)
 
+def probe_image_info(path: Path) -> ProbeInfo:
+    with _PIL_Image.open(path) as img:
+        w, h = img.size
+    return ProbeInfo(width=w, height=h, rotation=0, duration=10.0)
+
 def build_probe_cache(files: List[Path], max_workers: Optional[int] = None) -> Dict[Path, ProbeInfo]:
     cache: Dict[Path, ProbeInfo] = {}
     if not files:
         return cache
-    # Threaded ffprobe (IO-bound → Threads ok)
+
     workers = max_workers or max(1, (min(16, os.cpu_count()) or 4))
 
+    def _probe(path: Path) -> ProbeInfo:
+        ext = path.suffix.lower()
+        if ext in IMAGE_EXTS:
+            return probe_image_info(path)
+        return ffprobe_video_info(path)
+
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        future_map = {ex.submit(ffprobe_video_info, p): p for p in files}
+        future_map = {ex.submit(_probe, p): p for p in files}
         for fut in as_completed(future_map):
             p = future_map[fut]
             try:
@@ -543,14 +557,18 @@ def _derive_clip_audio_paths(out_path: Path) -> Tuple[Path, Path]:
     return norm, wet
 
 class _ClipCache:
-    def __init__(self):
+    def __init__(self, probe_cache: Dict[Path, ProbeInfo]):
         self._cache: Dict[Path, VideoFileClip] = {}
+        self._probes = probe_cache
 
     def get(self, path: Path) -> VideoFileClip:
         clip = self._cache.get(path)
         if clip is None:
-            # audio=True lassen, weil das Montage-Audio aus den Subclips stammt
-            clip = VideoFileClip(str(path))
+            if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}:
+                dur = max(0.1, (self._probes.get(path) or ProbeInfo(0, 0, 0, 3.0)).duration or 3.0)
+                clip = ImageClip(str(path)).set_duration(dur)
+            else:
+                clip = VideoFileClip(str(path))
             self._cache[path] = clip
         return clip
 
@@ -700,8 +718,6 @@ def build_montage(
 ):
     setup_tempfile_cleanup(out_path)
 
-    clip_cache = _ClipCache()
-
     bg_volume = max(0.0, bg_volume)
     clip_volume = max(0.0, clip_volume)
     clip_reverb = clamp(clip_reverb, 0.0, 1.0)
@@ -749,6 +765,7 @@ def build_montage(
     print(f"PMVeaver - Found {len(list(unique_files))} video file(s) total")
 
     probe_cache = build_probe_cache(list(unique_files))
+    clip_cache = _ClipCache(probe_cache)
 
     next_portrait = _make_epoch_picker(specs, probe_cache, "portrait")
     next_landscape = _make_epoch_picker(specs, probe_cache, "landscape")
@@ -794,7 +811,11 @@ def build_montage(
                     continue
                 sub = src.subclip(start, end)
 
-                filled = cover_scale_and_crop(sub, default_w, default_h)
+                if isinstance(sub, ImageClip):
+                    filled = kenburns_cover(sub, default_w, default_h, dur=sub.duration, rng=_rng)
+                else:
+                    filled = cover_scale_and_crop(sub, default_w, default_h)
+
                 segments.append(filled)
                 total += filled.duration
 
@@ -836,10 +857,10 @@ def build_montage(
                     continue
 
                 sA, eA = compute_segment_bounds(
-                    srcA.duration, effective_bpm, min_beats, max_beats, beat_mode, min_seconds, max_seconds, fps
+                    srcA.duration, effective_bpm, min_beats, max_beats, beat_mode, min_seconds, max_seconds, fps, trim_large_clips
                 )
                 sB, eB = compute_segment_bounds(
-                    srcB.duration, effective_bpm, min_beats, max_beats, beat_mode, min_seconds, max_seconds, fps
+                    srcB.duration, effective_bpm, min_beats, max_beats, beat_mode, min_seconds, max_seconds, fps, trim_large_clips
                 )
                 if eA <= sA or eB <= sB:
                     continue
@@ -854,7 +875,14 @@ def build_montage(
 
                 subA = subA.subclip(0, dur)
                 subB = subB.subclip(0, dur)
+
+                if isinstance(subA, ImageClip):
+                    subA = kenburns_cover(subA, default_w // 3, default_h, dur=subA.duration, rng=_rng)
+                if isinstance(subB, ImageClip):
+                    subB = kenburns_cover(subB, default_w // 3, default_h, dur=subB.duration, rng=_rng)
+
                 trip = make_triptych(subA, subB, default_w, default_h)
+
                 segments.append(trip)
                 total += trip.duration
 
@@ -1318,6 +1346,88 @@ def _make_epoch_picker(
         return draw_unique_from_pool()
 
     return next_clip
+
+from moviepy.video.VideoClip import ImageClip
+import numpy as _np
+from PIL import Image as _KB_PIL_Image
+
+def kenburns_cover(
+    img_clip: ImageClip,
+    target_w: int,
+    target_h: int,
+    dur: float,
+    direction: Optional[str] = None,
+    zoom_in: bool = True,
+    zoom_amount: float = 0.08,
+    rng: Optional[random.Random] = None,
+) -> ImageClip:
+    rng = rng or _rng
+    if direction is None:
+        direction = rng.choice(['left','right','up','down','diag1','diag2'])
+
+    src_w, src_h = img_clip.size
+    if src_w == 0 or src_h == 0:
+        return img_clip.set_duration(dur)
+
+    # Basis-Scale, plus Extra-Spielraum fürs Panning/Zoom
+    base_scale = max(target_w / src_w, target_h / src_h)
+    extra = 1.0 + abs(zoom_amount) + 0.02
+    scale0 = base_scale * extra
+    scaled_w = int(round(src_w * scale0))
+    scaled_h = int(round(src_h * scale0))
+
+    clip = img_clip.resize(newsize=(scaled_w, scaled_h)).set_duration(dur)
+
+    max_x = max(0, scaled_w - target_w)
+    max_y = max(0, scaled_h - target_h)
+
+    # Start/Ende der Pan-Route
+    if direction == 'left':
+        x0, x1 = max_x, 0; y0 = y1 = max_y // 2
+    elif direction == 'right':
+        x0, x1 = 0, max_x; y0 = y1 = max_y // 2
+    elif direction == 'up':
+        y0, y1 = max_y, 0; x0 = x1 = max_x // 2
+    elif direction == 'down':
+        y0, y1 = 0, max_y; x0 = x1 = max_x // 2
+    elif direction == 'diag1':
+        x0, y0 = 0, 0; x1, y1 = max_x, max_y
+    else:  # diag2
+        x0, y0 = max_x, max_y; x1, y1 = 0, 0
+
+    def _lerp(a, b, t): return a + (b - a) * t
+    def _nt(t):
+        if dur <= 1e-6: return 1.0
+        return 0.0 if t <= 0 else 1.0 if t >= dur else (t / dur)
+
+    # Optional: leichtes Zoom-in während des Pans (auf das Cropping angewandt)
+    # Wir simulieren’s, indem wir die Pan-Geschwindigkeit minimal verzerren
+    # (kein zusätzliches Resizing nötig; die Cropposition wandert etwas stärker).
+    zoom_bias = abs(zoom_amount) if zoom_in else 0.0
+
+    def _kb_frame(get_frame, t):
+        p = _nt(t)
+        # Minimale nonlineare Verzerrung für "Zoom-Gefühl"
+        pz = min(1.0, max(0.0, p + zoom_bias * (p * (1 - p))))
+
+        cx = int(round(_lerp(x0, x1, pz)))
+        cy = int(round(_lerp(y0, y1, pz)))
+        # Klemmen, damit das Fenster immer im Bild liegt
+        cx = 0 if max_x == 0 else min(max(cx, 0), max_x)
+        cy = 0 if max_y == 0 else min(max(cy, 0), max_y)
+
+        frame = get_frame(t)  # ndarray (H,W,3 or 4)
+        # Croppen
+        crop = frame[cy:cy + target_h, cx:cx + target_w]
+        # Falls an Kanten mal 1px fehlt (Rundung): sauber nachziehen
+        if crop.shape[0] != target_h or crop.shape[1] != target_w:
+            img = _KB_PIL_Image.fromarray(crop)
+            img = img.resize((target_w, target_h), resample=_PIL_Image.BICUBIC)
+            crop = _np.asarray(img, dtype=frame.dtype, order="C")
+        return crop
+
+    animated = clip.fl(_kb_frame, apply_to=['mask'])
+    return animated.set_duration(dur)
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser()
