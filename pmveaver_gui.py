@@ -268,6 +268,21 @@ class PMVeaverQt(QtWidgets.QWidget):
         src_form.addWidget(QtWidgets.QLabel("Output file:"),  3, 0)
         src_form.addWidget(self.ed_output,                    3, 1)
         src_form.addWidget(btn_output,                        3, 2)
+
+        src_form.addWidget(QtWidgets.QLabel("Intro file:"),  5, 0)
+        self.ed_intro = QtWidgets.QLineEdit()
+        src_form.addWidget(self.ed_intro,                    5, 1)
+        btn_intro = QtWidgets.QPushButton("Browse…")
+        btn_intro.clicked.connect(self._browse_intro)
+        src_form.addWidget(btn_intro,                        5, 2)
+
+        src_form.addWidget(QtWidgets.QLabel("Outro file:"),  6, 0)
+        self.ed_outro = QtWidgets.QLineEdit()
+        src_form.addWidget(self.ed_outro,                    6, 1)
+        btn_outro = QtWidgets.QPushButton("Browse…")
+        btn_outro.clicked.connect(self._browse_outro)
+        src_form.addWidget(btn_outro,                        6, 2)
+
         left_box.addWidget(src_group)
 
         left_box.addStretch(1)
@@ -1218,6 +1233,22 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         self._validate_inputs(False)
 
+    def _browse_intro(self):
+        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select intro", "",
+                                                     "Video file (*.mp4 *.mov *.m4v *.mkv *.avi *.webm *.mpg *.gif);;Image file (*.jpg *.jpeg *.png *.bmp *.webp);;All files (*.*)")
+        if f:
+            self.ed_intro.setText(_norm(f))
+
+        self._validate_inputs(False)
+
+    def _browse_outro(self):
+        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select outro", "",
+                                                     "Video file (*.mp4 *.mov *.m4v *.mkv *.avi *.webm *.mpg *.gif);;Image file (*.jpg *.jpeg *.png *.bmp *.webp);;All files (*.*)")
+        if f:
+            self.ed_outro.setText(_norm(f))
+
+        self._validate_inputs(False)
+
     def _build_args(self) -> list[str]:
         audio = _norm(self.ed_audio.text())
         videos = self._build_videos_arg()
@@ -1278,6 +1309,11 @@ class PMVeaverQt(QtWidgets.QWidget):
         if self.chk_trim.isChecked(): args += ["--trim-large-clips"]
 
         if self.ds_fadeout.value() > 0: args += ["--fade-out-seconds", f"{self.ds_fadeout.value():.2f}"]
+
+        intro = _norm(self.ed_intro.text())
+        if intro: args += ["--intro", intro]
+        outro = _norm(self.ed_outro.text())
+        if outro: args += ["--outro", outro]
 
         return args
 

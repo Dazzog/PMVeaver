@@ -689,6 +689,22 @@ def compute_segment_bounds(src_dur: float,
         # Zeit-basierter Modus (unverändert)
         return pick_segment_bounds_random_seconds(src_dur, min_s, max_s)
 
+def _load_intro_outro_clip(path: Path, target_w: int, target_h: int, fps: float, fallback_seconds: float) -> VideoFileClip:
+    """
+    Lädt ein Video ODER Bild:
+    - Video: cover-scale-and-crop auf Zielgröße, fps auf Ausgabe-fps gesetzt.
+    - Bild: KenBurns-Cover mit fallback_seconds Dauer.
+    Audio (falls im Video vorhanden) bleibt erhalten.
+    """
+    ext = path.suffix.lower()
+    if ext in IMAGE_EXTS:
+        v = ImageClip(str(path)).set_duration(fallback_seconds)
+    else:
+        v = VideoFileClip(str(path))
+    v = cover_scale_and_crop(v, target_w, target_h).set_fps(fps)
+    return v
+
+
 # ---------------- main build ----------------
 
 def build_montage(
@@ -718,6 +734,8 @@ def build_montage(
     trim_large_clips: bool,
     pulse_effect: bool,
     fade_out_seconds: float,
+    intro_path: Optional[Path],
+    outro_path: Optional[Path],
 ):
     setup_tempfile_cleanup(out_path)
 
@@ -1039,15 +1057,42 @@ def build_montage(
 
     montage = montage.set_audio(composite_audio)
 
+    # --- Optional: Intro/Outro "ankleben" ------------------------------------
+    parts = []
+    default_w = width or 1920
+    default_h = height or 1080
+
+    if intro_path is not None and Path(intro_path).exists():
+        try:
+            intro_clip = _load_intro_outro_clip(Path(intro_path), default_w, default_h, fps, 2)
+            parts.append(intro_clip)
+        except Exception as e:
+            print(f"Warning: failed to build intro clip: {e}", file=sys.stderr)
+
+    parts.append(montage)
+
+    if outro_path is not None and Path(outro_path).exists():
+        try:
+            outro_clip = _load_intro_outro_clip(Path(outro_path), default_w, default_h, fps, 4)
+            parts.append(outro_clip)
+        except Exception as e:
+            print(f"Warning: failed to build outro clip: {e}", file=sys.stderr)
+
+    if len(parts) > 1:
+        try:
+            montage = concatenate_videoclips(parts, method="chain")
+        finally:
+            # Schließe Intro/Outro-Teilclips nach dem Concatenate
+            for c in parts:
+                if c is not montage:
+                    try: c.close()
+                    except Exception: pass
+
     # --- Optionales Fade-Out am Ende ---
-    fade_s = max(0.0, min(float(fade_out_seconds or 0.0), max(0.0, target_duration - 0.05)))
+    fade_s = max(0.0, min(fade_out_seconds, target_duration - 0.05))
     if fade_s >= 0.05:
         try:
             montage = montage.fx(vfx.fadeout, fade_s)
-        except Exception:
-            pass
-        try:
-            montage = montage.audio_fadeout(fade_s)
         except Exception:
             pass
 
@@ -1362,7 +1407,6 @@ def _make_epoch_picker(
 
     return next_clip
 
-from moviepy.video.VideoClip import ImageClip
 import numpy as _np
 from PIL import Image as _KB_PIL_Image
 
@@ -1494,6 +1538,9 @@ def parse_args(argv=None):
     p.add_argument("--trim-large-clips", action="store_true", help="Lange Clips nur segmentweise nutzen (default: ganz verwenden).")
     p.add_argument("--fade-out-seconds", type=float, default=0.0, help="Länge des Video-/Audio-Fade-Outs am Ende (Sekunden, 0=aus).")
 
+    p.add_argument("--intro", type=Path, help="Optionaler Intro-Clip oder -Bild (wird vorangestellt).")
+    p.add_argument("--outro", type=Path, help="Optionaler Outro-Clip oder -Bild (wird angehängt).")
+
     args = p.parse_args(argv)
 
     # --- Clamping & Sanitizing ---
@@ -1585,6 +1632,8 @@ def main(argv=None):
         pulse_effect=args.pulse_effect,
         trim_large_clips = args.trim_large_clips,
         fade_out_seconds=args.fade_out_seconds,
+        intro_path=args.intro,
+        outro_path=args.outro,
     )
 
 
