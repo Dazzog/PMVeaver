@@ -235,12 +235,19 @@ class PMVeaverQt(QtWidgets.QWidget):
         src_group = QtWidgets.QGroupBox("Sources / Output")
         src_form = QtWidgets.QGridLayout(src_group)
 
-        self.ed_audio  = QtWidgets.QLineEdit()
+        self.ed_audio = FileDropLineEdit()
         self.ed_audio.editingFinished.connect(self._autofill_output_from_audio)
 
-        self.ed_output = QtWidgets.QLineEdit()
+        btn_audio  = QtWidgets.QPushButton("Browse…")
+        btn_audio.clicked.connect(self._browse_audio)
 
-        src_form.addWidget(QtWidgets.QLabel("Source folders:"), 1, 0)
+        src_form.addWidget(QtWidgets.QLabel("Audio:"),        0, 0)
+        src_form.addWidget(self.ed_audio,                     0, 1)
+        src_form.addWidget(btn_audio,                         0, 2)
+
+        src_form.addItem(QtWidgets.QSpacerItem(0, 20), 1, 0)
+
+        src_form.addWidget(QtWidgets.QLabel("Source folders:"), 2, 0)
         self.videos_container = QtWidgets.QWidget()
         self.videos_layout = QtWidgets.QVBoxLayout(self.videos_container)
         self.videos_layout.setContentsMargins(0, 0, 0, 0)
@@ -249,38 +256,36 @@ class PMVeaverQt(QtWidgets.QWidget):
         self.video_rows: list[dict] = []
         self._add_video_row()
 
-        btn_audio  = QtWidgets.QPushButton("Browse…")
-        btn_audio.clicked.connect(self._browse_audio)
-        btn_output = QtWidgets.QPushButton("Browse…")
-        btn_output.clicked.connect(self._browse_output)
-
-        src_form.addWidget(QtWidgets.QLabel("Audio:"),        0, 0)
-        src_form.addWidget(self.ed_audio,                     0, 1)
-        src_form.addWidget(btn_audio,                         0, 2)
-
-        src_form.addWidget(self.videos_container,             1, 1, 1, 2)
+        src_form.addWidget(self.videos_container,             2, 1, 1, 2)
 
         self.chk_trim = QtWidgets.QCheckBox("Trim long clips")
-        src_form.addWidget(self.chk_trim, 2, 1)
+        src_form.addWidget(self.chk_trim, 3, 1)
+
+        src_form.addItem(QtWidgets.QSpacerItem(0, 20), 4, 0)
 
 
-        src_form.addWidget(QtWidgets.QLabel("Output file:"),  3, 0)
-        src_form.addWidget(self.ed_output,                    3, 1)
-        src_form.addWidget(btn_output,                        3, 2)
+        src_form.addWidget(QtWidgets.QLabel("Output file:"),  5, 0)
+        self.ed_output = FileDropLineEdit()
+        src_form.addWidget(self.ed_output,                    5, 1)
+        btn_output = QtWidgets.QPushButton("Browse…")
+        btn_output.clicked.connect(self._browse_output)
+        src_form.addWidget(btn_output,                        5, 2)
 
-        src_form.addWidget(QtWidgets.QLabel("Intro file:"),  5, 0)
-        self.ed_intro = QtWidgets.QLineEdit()
-        src_form.addWidget(self.ed_intro,                    5, 1)
+        src_form.addItem(QtWidgets.QSpacerItem(0, 20), 6, 0)
+
+        src_form.addWidget(QtWidgets.QLabel("Intro file:"),  7, 0)
+        self.ed_intro = FileDropLineEdit()
+        src_form.addWidget(self.ed_intro,                    7, 1)
         btn_intro = QtWidgets.QPushButton("Browse…")
         btn_intro.clicked.connect(self._browse_intro)
-        src_form.addWidget(btn_intro,                        5, 2)
+        src_form.addWidget(btn_intro,                        7, 2)
 
-        src_form.addWidget(QtWidgets.QLabel("Outro file:"),  6, 0)
-        self.ed_outro = QtWidgets.QLineEdit()
-        src_form.addWidget(self.ed_outro,                    6, 1)
+        src_form.addWidget(QtWidgets.QLabel("Outro file:"),  8, 0)
+        self.ed_outro = FileDropLineEdit()
+        src_form.addWidget(self.ed_outro,                    8, 1)
         btn_outro = QtWidgets.QPushButton("Browse…")
         btn_outro.clicked.connect(self._browse_outro)
-        src_form.addWidget(btn_outro,                        6, 2)
+        src_form.addWidget(btn_outro,                        8, 2)
 
         left_box.addWidget(src_group)
 
@@ -1146,7 +1151,8 @@ class PMVeaverQt(QtWidgets.QWidget):
             self.cb_preset.setEnabled(False)
 
     def _browse_audio(self):
-        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select audio", "",
+        start_dir = _norm(self.ed_audio.text().strip()) or _norm(os.getcwd())
+        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select audio", start_dir,
                                                      "Audio (*.mp3 *.wav *.flac *.m4a);;All files (*.*)")
         if f:
             self.ed_audio.setText(_norm(f))
@@ -1164,7 +1170,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         h.setContentsMargins(0, 0, 0, 0);
         h.setSpacing(6)
 
-        ed_path = QtWidgets.QLineEdit()
+        ed_path = DirDropLineEdit()
         ed_path.setPlaceholderText("Video-Ordner auswählen…")
         if path: ed_path.setText(_norm(path))
 
@@ -1312,14 +1318,16 @@ class PMVeaverQt(QtWidgets.QWidget):
         return ok
 
     def _browse_output(self):
-        f, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Select output", "",
+        start_dir = _norm(self.ed_output.text().strip()) or _norm(os.getcwd())
+        f, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Select output", start_dir,
                                                      "MP4 (*.mp4);;All files (*.*)")
         if f: self.ed_output.setText(_norm(f))
 
         self._validate_inputs(False)
 
     def _browse_intro(self):
-        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select intro", "",
+        start_dir = _norm(self.ed_intro.text().strip()) or _norm(os.getcwd())
+        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select intro", start_dir,
                                                      "Video file (*.mp4 *.mov *.m4v *.mkv *.avi *.webm *.mpg *.gif);;Image file (*.jpg *.jpeg *.png *.bmp *.webp);;All files (*.*)")
         if f:
             self.ed_intro.setText(_norm(f))
@@ -1327,7 +1335,8 @@ class PMVeaverQt(QtWidgets.QWidget):
         self._validate_inputs(False)
 
     def _browse_outro(self):
-        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select outro", "",
+        start_dir = _norm(self.ed_outro.text().strip()) or _norm(os.getcwd())
+        f, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select outro", start_dir,
                                                      "Video file (*.mp4 *.mov *.m4v *.mkv *.avi *.webm *.mpg *.gif);;Image file (*.jpg *.jpeg *.png *.bmp *.webp);;All files (*.*)")
         if f:
             self.ed_outro.setText(_norm(f))
@@ -1755,6 +1764,54 @@ class PMVeaverQt(QtWidgets.QWidget):
 def resource_path(rel: str) -> str:
     base = getattr(sys, "_MEIPASS", Path(__file__).parent)
     return str(Path(base, rel))
+
+class FileDropLineEdit(QtWidgets.QLineEdit):
+    """QLineEdit, das Datei-Drops akzeptiert (optional: Ext-Whitelist)."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, e: QtGui.QDragEnterEvent):
+        if e.mimeData().hasUrls():
+            for url in e.mimeData().urls():
+                p = Path(url.toLocalFile())
+                if p.is_file():
+                    e.acceptProposedAction()
+                    return
+        e.ignore()
+
+    def dropEvent(self, e: QtGui.QDropEvent):
+        for url in e.mimeData().urls():
+            p = Path(url.toLocalFile())
+            if p.is_file():
+                self.setText(_norm(str(p)))
+                self.editingFinished.emit()
+                break
+        e.acceptProposedAction()
+
+class DirDropLineEdit(QtWidgets.QLineEdit):
+    """QLineEdit, das Ordner-Drops akzeptiert."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, e: QtGui.QDragEnterEvent):
+        if e.mimeData().hasUrls():
+            for url in e.mimeData().urls():
+                p = Path(url.toLocalFile())
+                if p.is_dir():
+                    e.acceptProposedAction()
+                    return
+        e.ignore()
+
+    def dropEvent(self, e: QtGui.QDropEvent):
+        for url in e.mimeData().urls():
+            p = Path(url.toLocalFile())
+            if p.is_dir():
+                self.setText(_norm(str(p)))
+                self.editingFinished.emit()
+                break
+        e.acceptProposedAction()
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
