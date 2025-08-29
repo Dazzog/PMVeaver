@@ -59,7 +59,10 @@ a = Analysis(
     ['pmveaver_gui.py'],
     pathex=[],
     binaries=[],
-    datas=[(str(SPEC_DIR / 'assets' / 'icon.ico'), 'assets')],
+    datas=[
+        (str(SPEC_DIR / 'assets' / 'icon.ico'), 'assets'),
+        (str(SPEC_DIR / 'assets' / 'MaterialSymbolsOutlined.ttf'), 'assets')
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

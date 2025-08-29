@@ -74,7 +74,7 @@ from PIL import Image as _PIL_Image
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".mpg", ".gif"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}

@@ -4,8 +4,9 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 import qdarktheme
+import builtins
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 APP_TITLE = "PMVeaver"
 
@@ -45,6 +46,7 @@ RENDER_PROFILES = {
 
 ERROR_CSS = "QLineEdit{border:1px solid #d9534f; border-radius:4px;}"  # rot
 OK_CSS    = ""  # Default-Style
+
 
 def _norm(p: str) -> str:
     return os.path.normpath(os.path.expandvars(os.path.expanduser(p or "")))
@@ -187,10 +189,126 @@ class TriangularDistWidget(QtWidgets.QWidget):
             p.setPen(pen)
             p.drawLine(x_mode, rect.top(), x_mode, rect.bottom())
 
+class ConsoleWindow(QtWidgets.QWidget):
+    def __init__(self):
+        super().__init__(None)
+        self.setWindowTitle("PMVeaver – Console")
+        self.setWindowFlag(QtCore.Qt.Window, True)
+        self.resize(800, 500)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        self.edit = QtWidgets.QPlainTextEdit(self)
+        self.edit.setReadOnly(True)
+        # Monospace
+        candidates = ["Cascadia Mono", "Consolas"]
+        for fam in candidates:
+            if fam in QtGui.QFontDatabase.families():
+                f = QtGui.QFont(fam)
+                break
+        else:
+            f = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
+        f.setPointSize(10)
+        self.edit.setFont(f)
+        layout.addWidget(self.edit)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_copy = QtWidgets.QPushButton("Copy all")
+        btn_clear = QtWidgets.QPushButton("Clear")
+        btn_copy.clicked.connect(self._copy_all)
+        btn_clear.clicked.connect(self.clear)
+
+        btn_row.addStretch(1)
+        btn_row.addWidget(btn_copy)
+        btn_row.addWidget(btn_clear)
+
+        layout.addLayout(btn_row)
+
+        self._cr_active = False
+        # ANSI CSI/OSC Sequenzen rausfiltern (Farben, Cursorsteuerung)
+        self._ansi_re = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]|\x1b\]0;.*?\x07')
+
+    # --- Helfer
+    def _cursor_end(self):
+        cur = self.edit.textCursor()
+        cur.movePosition(QtGui.QTextCursor.End)
+        return cur
+
+    def _replace_current_line(self, text: str, fmt):
+        cur = self._cursor_end()
+        cur.movePosition(QtGui.QTextCursor.StartOfBlock, QtGui.QTextCursor.KeepAnchor)
+        cur.insertText(text, fmt)
+
+    def append_text(self, s: str, gui=False):
+        if not s:
+            return
+
+        # ANSI raus; Windows CRLF zu \n normalisieren
+        s = s.replace('\r\n', '\n')
+        s = self._ansi_re.sub('', s)
+
+        fmt = QtGui.QTextCharFormat()
+        if gui:
+            fmt.setForeground(QtGui.QBrush(QtGui.QColor("#8571c9")))
+        else:
+            fmt.setForeground(QtGui.QBrush(self.palette().text().color()))
+
+        # Split, Seps behalten -> ['chunk', '\r', 'chunk', '\n', ...]
+        parts = re.split(r'(\r|\n)', s)
+
+        for tok in parts:
+            if tok == '':
+                continue
+            if tok == '\r':
+                # Nächster Text ersetzt die aktuelle Zeile (tqdm update)
+                self._cr_active = True
+                continue
+            if tok == '\n':
+                # Neue Zeile erzwingen
+                self._cursor_end().insertText('\n')
+                self._cr_active = False
+                continue
+
+            # normaler Text
+            if self._cr_active:
+                self._replace_current_line(tok, fmt)
+                self._cr_active = False
+            else:
+                self._cursor_end().insertText(tok, fmt)
+
+        self.edit.ensureCursorVisible()
+
+    def clear(self):
+        self.edit.setPlainText("")
+
+    def _copy_all(self):
+        self.edit.selectAll()
+        self.edit.copy()
+        # Auswahl zurück ans Ende setzen
+        self.edit.moveCursor(QtGui.QTextCursor.End)
+
 
 class PMVeaverQt(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+
+        fid = QtGui.QFontDatabase.addApplicationFont(resource_path("assets/MaterialSymbolsOutlined.ttf"))
+        family = QtGui.QFontDatabase.applicationFontFamilies(fid)[0]
+
+        self.icon_font = QtGui.QFont(family)
+        self.icon_font.setPointSize(18)
+
+        self.console_win = ConsoleWindow()
+
+        def gui_print(*args, **kwargs):
+            text = " ".join(str(a) for a in args)
+
+            self._orig_print(text, **kwargs)
+            if self.console_win:
+                self.console_win.append_text(text + "\n", gui=True)
+
+        self._orig_print = builtins.print
+        builtins.print = gui_print
+
         self.setWindowTitle(APP_TITLE)
 
         # --- System-Dark/Light automatisch
@@ -238,7 +356,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         self.ed_audio = FileDropLineEdit()
         self.ed_audio.editingFinished.connect(self._autofill_output_from_audio)
 
-        btn_audio  = QtWidgets.QPushButton("Browse…")
+        btn_audio = self.IconButton("\ueb82")
         btn_audio.clicked.connect(self._browse_audio)
 
         src_form.addWidget(QtWidgets.QLabel("Audio:"),        0, 0)
@@ -267,7 +385,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         src_form.addWidget(QtWidgets.QLabel("Output file:"),  5, 0)
         self.ed_output = FileDropLineEdit()
         src_form.addWidget(self.ed_output,                    5, 1)
-        btn_output = QtWidgets.QPushButton("Browse…")
+        btn_output = self.IconButton("\uf17f")
         btn_output.clicked.connect(self._browse_output)
         src_form.addWidget(btn_output,                        5, 2)
 
@@ -276,14 +394,14 @@ class PMVeaverQt(QtWidgets.QWidget):
         src_form.addWidget(QtWidgets.QLabel("Intro file:"),  7, 0)
         self.ed_intro = FileDropLineEdit()
         src_form.addWidget(self.ed_intro,                    7, 1)
-        btn_intro = QtWidgets.QPushButton("Browse…")
+        btn_intro = self.IconButton("\ueb87")
         btn_intro.clicked.connect(self._browse_intro)
         src_form.addWidget(btn_intro,                        7, 2)
 
         src_form.addWidget(QtWidgets.QLabel("Outro file:"),  8, 0)
         self.ed_outro = FileDropLineEdit()
         src_form.addWidget(self.ed_outro,                    8, 1)
-        btn_outro = QtWidgets.QPushButton("Browse…")
+        btn_outro = self.IconButton("\ueb87")
         btn_outro.clicked.connect(self._browse_outro)
         src_form.addWidget(btn_outro,                        8, 2)
 
@@ -354,40 +472,51 @@ class PMVeaverQt(QtWidgets.QWidget):
         # ----- Buttons + FFmpeg-Status
         btn_row = QtWidgets.QHBoxLayout()
         btn_row.setContentsMargins(0, 8, 0, 0)
+        btn_row.setSpacing(8)
 
-        self.btn_start = QtWidgets.QPushButton("Start")
+        self.btn_start = QtWidgets.QPushButton(" Start")
         self.btn_start.setObjectName("btnStart")
         self.btn_start.clicked.connect(self.start)
         self.btn_start.setCursor(QtCore.Qt.PointingHandCursor)
-        self.btn_start.setMinimumHeight(44)  # << größer
         self.btn_start.setSizePolicy(QtWidgets.QSizePolicy.Expanding,
                                      QtWidgets.QSizePolicy.Fixed)
 
         # größere, fette Schrift
         f = self.btn_start.font()
         f.setBold(True)
-        f.setPointSize(int(f.pointSize() * 1.15))
+        f.setPointSize(int(f.pointSize() * 1.25))
         self.btn_start.setFont(f)
-        # Icon (systemweit) – optional, aber wertig
-        self.btn_start.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_MediaPlay))
-        self.btn_start.setIconSize(QtCore.QSize(24, 24))
-        # Primär-Style (farblich zum Theme passend)
+        self.btn_start.setIcon(self.qicon_from_glyph("\ue1c4"))
+        self.btn_start.setIconSize(QtCore.QSize(32, 32))
+
         self.btn_start.setStyleSheet("""
         QPushButton#btnStart {
             border-radius: 8px;
             padding: 8px 18px;
         }
         """)
+        btn_row.addWidget(self.btn_start)
 
-        self.btn_stop = QtWidgets.QPushButton("Stop")
-        self.btn_stop.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_MediaStop))
+        self.btn_stop = QtWidgets.QPushButton(" Stop")
+        self.btn_stop.setIcon(self.qicon_from_glyph("\ue5c9"))
+        self.btn_stop.setIconSize(QtCore.QSize(24, 24))
         self.btn_stop.clicked.connect(self.stop)
         self.btn_stop.setEnabled(False)
+        btn_row.addWidget(self.btn_stop, 0, QtCore.Qt.AlignBottom)
 
-        btn_row.addWidget(self.btn_start); btn_row.addWidget(self.btn_stop); btn_row.addStretch(1)
+        self.btn_console = QtWidgets.QPushButton(" Console…")
+        self.btn_console.setIcon(self.qicon_from_glyph("\ueb8e"))
+        self.btn_console.setIconSize(QtCore.QSize(24, 24))
+        self.btn_console.setEnabled(True)
+        self.btn_console.clicked.connect(lambda: (self.console_win.show(),
+                                                  self.console_win.raise_(),
+                                                  self.console_win.activateWindow()))
+        btn_row.addWidget(self.btn_console, 0, QtCore.Qt.AlignBottom)
+
+        btn_row.addStretch(1)
 
         self.lbl_ffmpeg = QtWidgets.QLabel("FFmpeg: …")
-        btn_row.addWidget(self.lbl_ffmpeg)
+        btn_row.addWidget(self.lbl_ffmpeg, 0, QtCore.Qt.AlignBottom)
         left_box.addLayout(btn_row)
 
         main_split.addLayout(left_box, stretch=3)
@@ -532,7 +661,9 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         # --- 3D LUT Auswahl ---
         self.cb_lut = QtWidgets.QComboBox()
-        btn_lut_reload = QtWidgets.QPushButton("Reload")
+        btn_lut_reload = QtWidgets.QPushButton(" Reload")
+        btn_lut_reload.setIcon(self.qicon_from_glyph("\ue5d5"))
+        btn_lut_reload.setIconSize(QtCore.QSize(24, 24))
         btn_lut_reload.setCursor(QtCore.Qt.PointingHandCursor)
 
         g.addWidget(QtWidgets.QLabel("3D LUT"), 2, 0)
@@ -822,6 +953,10 @@ class PMVeaverQt(QtWidgets.QWidget):
                                            "pmveaver.exe / pmveaver.py wurde nicht gefunden.\nLege es neben diese GUI.")
             return
 
+        out_txt = _norm(self.ed_output.text().strip())
+        if not self._handle_output_conflict(Path(out_txt)):
+            return
+
         self.proc = QtCore.QProcess(self)
         self.proc.setProcessChannelMode(QtCore.QProcess.MergedChannels)
 
@@ -848,7 +983,10 @@ class PMVeaverQt(QtWidgets.QWidget):
             self.proc = None
             return
 
-        print("GUI> Starting:", " ".join(self._quote(a) for a in ([program] + full_args)), flush=True)
+        if hasattr(self, "console_win") and self.console_win:
+            self.console_win.clear()
+
+        print("PMVeaver GUI - Starting:", " ".join(self._quote(a) for a in ([program] + full_args)), flush=True)
 
         # UI-Status
         self._reset_progress()
@@ -919,6 +1057,9 @@ class PMVeaverQt(QtWidgets.QWidget):
             sys.stdout.write(text); sys.stdout.flush()
         except Exception:
             pass
+
+        if hasattr(self, "console_win") and self.console_win:
+            self.console_win.append_text(text)
 
     def _on_finished(self, exit_code: int, status: QtCore.QProcess.ExitStatus):
         if self._aborted:
@@ -1117,7 +1258,6 @@ class PMVeaverQt(QtWidgets.QWidget):
         self.lbl_preview.setText("")
         self._apply_preview_pixmap()
 
-    # ===================== Helper =====================
     def _sync_bpm_ui(self):
         detect = self.chk_bpm.isChecked()
         self.ed_bpm.setEnabled(not detect)
@@ -1174,8 +1314,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         ed_path.setPlaceholderText("Video-Ordner auswählen…")
         if path: ed_path.setText(_norm(path))
 
-        btn_browse = QtWidgets.QPushButton("Browse…")
-        btn_browse.setCursor(QtCore.Qt.PointingHandCursor)
+        btn_browse = self.IconButton("\ue2c7")
 
         ed_weight = QtWidgets.QLineEdit()
         ed_weight.setPlaceholderText("1")  # leere Eingabe ⇒ Gewicht = 1
@@ -1527,90 +1666,6 @@ class PMVeaverQt(QtWidgets.QWidget):
         else:
             self.lbl_lut_preview.setText("preview failed")
 
-    def _build_args(self) -> list[str]:
-        audio = _norm(self.ed_audio.text())
-        videos = self._build_videos_arg()
-        output = _norm(self.ed_output.text())
-        if not (audio and videos and output):
-            return []
-
-        args = [
-            "--audio", audio,
-            "--videos", videos,
-            "--output", output,
-            "--width", str(self.sb_w.value()),
-            "--height", str(self.sb_h.value()),
-            "--fps", str(self.sb_fps.value()),
-            "--bg-volume", f"{self.sl_bg.value() / 100.0:.2f}",
-            "--clip-volume", f"{self.sl_clip.value() / 100.0:.2f}",
-            "--clip-reverb", f"{self.sl_rev.value() / 100.0:.2f}",
-            "--codec", self.cb_codec.currentText(),
-            "--audio-codec", self.cb_audio.currentText(),
-            "--triptych-carry", str(self.ds_triptych_carry.value() / 100.0),
-            "--contrast", f"{self.sl_contrast.value() / 100.0:.2f}",
-            "--saturation", f"{self.sl_saturation.value() / 100.0:.2f}",
-        ]
-
-        if self.cb_preset.isEnabled() and self.cb_preset.currentText():
-            args += ["--preset", self.cb_preset.currentText()]
-        if self.ed_bitrate.text().strip():
-            args += ["--bitrate", self.ed_bitrate.text().strip()]
-        if self.ed_threads.text().strip():
-            args += ["--threads", self.ed_threads.text().strip()]
-
-        # BPM / Sekunden Handling
-        if self.chk_bpm.isChecked():
-            # Automatische BPM-Erkennung
-            args += ["--bpm-detect"]
-            args += [
-                "--min-beats", str(self.sb_min_beats.value()),
-                "--max-beats", str(self.sb_max_beats.value()),
-                "--beat-mode", f"{self.ds_beat_mode.value():.2f}"
-            ]
-        elif self.ed_bpm.text().strip():
-            # Manuelle BPM-Eingabe
-            args += ["--bpm", self.ed_bpm.text().strip()]
-            args += [
-                "--min-beats", str(self.sb_min_beats.value()),
-                "--max-beats", str(self.sb_max_beats.value()),
-                "--beat-mode", f"{self.ds_beat_mode.value():.2f}"
-            ]
-        else:
-            # Fallback: Sekundenwerte
-            args += [
-                "--min-seconds", f"{self.ds_min_seconds.value():.2f}",
-                "--max-seconds", f"{self.ds_max_seconds.value():.2f}"
-            ]
-
-        # Preview explizit mit true/false
-        args += ["--preview", "true" if self.chk_preview.isChecked() else "false"]
-
-        if self.chk_pulse.isChecked(): args += ["--pulse-effect"]
-        if self.chk_trim.isChecked(): args += ["--trim-large-clips"]
-
-        if self.ds_fadeout.value() > 0: args += ["--fade-out-seconds", f"{self.ds_fadeout.value():.2f}"]
-
-        intro_txt = self.ed_intro.text().strip()
-        if intro_txt:
-            intro_path = _norm(intro_txt)
-            if Path(intro_path).is_file():
-                args += ["--intro", intro_path]
-
-        outro_txt = self.ed_outro.text().strip()
-        if outro_txt:
-            outro_path = _norm(outro_txt)
-            if Path(outro_path).is_file():
-                args += ["--outro", outro_path]
-
-        if hasattr(self, "cb_lut"):
-            idx = self.cb_lut.currentIndex()
-            if idx > 0:  # 0 = "(none)"
-                lut_path = self.cb_lut.itemData(idx)
-                if lut_path:
-                    args += ["--lut", _norm(lut_path)]
-
-        return args
-
     def _autofill_video_folder(self):
         """
         Versucht sinnvolle Standard-Ordner zu finden und setzt *erste Zeile* darauf,
@@ -1761,6 +1816,178 @@ class PMVeaverQt(QtWidgets.QWidget):
             )
         return all_ok
 
+    def _next_numbered_path(self, p: Path) -> Path:
+        """Erzeuge 'name (1).ext', 'name (2).ext', ... bis frei."""
+        stem, suf = p.stem, p.suffix
+        i = 1
+        while True:
+            cand = p.with_name(f"{stem} ({i}){suf}")
+            if not cand.exists():
+                return cand
+            i += 1
+
+    def _handle_output_conflict(self, p: Path) -> bool:
+        """
+        Zeigt eine Auswahl:
+          - Überschreiben
+          - Umbenennen ➜ name (1).ext
+          - Abbrechen
+        Rückgabe: True = fortfahren, False = abbrechen
+        """
+        if not p.exists():
+            return True
+        if p.is_dir():
+            QtWidgets.QMessageBox.warning(self, "Ungültiger Pfad",
+                                          "Der angegebene Ausgabepfad ist ein Ordner. Bitte eine Datei wählen.")
+            return False
+
+        cand = self._next_numbered_path(p)
+
+        m = QtWidgets.QMessageBox(self)
+        m.setWindowTitle("Datei existiert bereits")
+        m.setIcon(QtWidgets.QMessageBox.Warning)
+        m.setText(f"Die Ausgabedatei existiert bereits:\n{p}\n\nWas möchtest du tun?")
+        btn_over = m.addButton("Überschreiben", QtWidgets.QMessageBox.DestructiveRole)
+        btn_ren = m.addButton(f"Umbenennen → {cand.name}", QtWidgets.QMessageBox.ActionRole)
+        btn_cancel = m.addButton("Abbrechen", QtWidgets.QMessageBox.RejectRole)
+        m.exec()
+
+        clicked = m.clickedButton()
+        if clicked is btn_over:
+            return True
+        if clicked is btn_ren:
+            self.ed_output.setText(str(cand))  # neuen Namen ins Feld übernehmen
+            return True
+        return False
+
+    def IconButton(
+            self,
+            label: str | None = None,
+    ) -> QtWidgets.QPushButton:
+        btn = QtWidgets.QPushButton(label)
+        btn.setFont(self.icon_font)
+        btn.setCursor(QtCore.Qt.PointingHandCursor)
+
+        btn.setStyleSheet("QPushButton { padding: 2px 4px; }")
+
+        return btn
+
+    def qicon_from_glyph(self, glyph: str) -> QtGui.QIcon:
+        # Farbe aus Palette, wenn nicht vorgegeben
+        pal = QtWidgets.QApplication.palette()
+        col_norm = pal.buttonText().color()
+        col_dis = pal.color(QtGui.QPalette.Disabled, QtGui.QPalette.ButtonText)
+        point_size = 20
+        icon_font = self.icon_font
+
+        def _render(col: QtGui.QColor) -> QtGui.QPixmap:
+            fm = QtGui.QFontMetrics(icon_font)
+            w = max(fm.horizontalAdvance(glyph), point_size) + 2
+            h = max(fm.height(), point_size) + 2
+
+            dpr = QtGui.QGuiApplication.primaryScreen().devicePixelRatio() or 1
+            pm = QtGui.QPixmap(int(w * dpr), int(h * dpr))
+            pm.fill(QtCore.Qt.transparent)
+            pm.setDevicePixelRatio(dpr)
+
+            p = QtGui.QPainter(pm)
+            p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+            p.setFont(icon_font)
+            p.setPen(col)
+            p.drawText(QtCore.QRectF(0, 0, w, h), QtCore.Qt.AlignCenter, glyph)
+            p.end()
+            return pm
+
+        icon = QtGui.QIcon()
+        icon.addPixmap(_render(col_norm), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        icon.addPixmap(_render(col_dis), QtGui.QIcon.Disabled, QtGui.QIcon.Off)
+        return icon
+
+    def _build_args(self) -> list[str]:
+        audio = _norm(self.ed_audio.text())
+        videos = self._build_videos_arg()
+        output = _norm(self.ed_output.text())
+        if not (audio and videos and output):
+            return []
+
+        args = [
+            "--audio", audio,
+            "--videos", videos,
+            "--output", output,
+            "--width", str(self.sb_w.value()),
+            "--height", str(self.sb_h.value()),
+            "--fps", str(self.sb_fps.value()),
+            "--bg-volume", f"{self.sl_bg.value() / 100.0:.2f}",
+            "--clip-volume", f"{self.sl_clip.value() / 100.0:.2f}",
+            "--clip-reverb", f"{self.sl_rev.value() / 100.0:.2f}",
+            "--codec", self.cb_codec.currentText(),
+            "--audio-codec", self.cb_audio.currentText(),
+            "--triptych-carry", str(self.ds_triptych_carry.value() / 100.0),
+            "--contrast", f"{self.sl_contrast.value() / 100.0:.2f}",
+            "--saturation", f"{self.sl_saturation.value() / 100.0:.2f}",
+        ]
+
+        if self.cb_preset.isEnabled() and self.cb_preset.currentText():
+            args += ["--preset", self.cb_preset.currentText()]
+        if self.ed_bitrate.text().strip():
+            args += ["--bitrate", self.ed_bitrate.text().strip()]
+        if self.ed_threads.text().strip():
+            args += ["--threads", self.ed_threads.text().strip()]
+
+        # BPM / Sekunden Handling
+        if self.chk_bpm.isChecked():
+            # Automatische BPM-Erkennung
+            args += ["--bpm-detect"]
+            args += [
+                "--min-beats", str(self.sb_min_beats.value()),
+                "--max-beats", str(self.sb_max_beats.value()),
+                "--beat-mode", f"{self.ds_beat_mode.value():.2f}"
+            ]
+        elif self.ed_bpm.text().strip():
+            # Manuelle BPM-Eingabe
+            args += ["--bpm", self.ed_bpm.text().strip()]
+            args += [
+                "--min-beats", str(self.sb_min_beats.value()),
+                "--max-beats", str(self.sb_max_beats.value()),
+                "--beat-mode", f"{self.ds_beat_mode.value():.2f}"
+            ]
+        else:
+            # Fallback: Sekundenwerte
+            args += [
+                "--min-seconds", f"{self.ds_min_seconds.value():.2f}",
+                "--max-seconds", f"{self.ds_max_seconds.value():.2f}"
+            ]
+
+        # Preview explizit mit true/false
+        args += ["--preview", "true" if self.chk_preview.isChecked() else "false"]
+
+        if self.chk_pulse.isChecked(): args += ["--pulse-effect"]
+        if self.chk_trim.isChecked(): args += ["--trim-large-clips"]
+
+        if self.ds_fadeout.value() > 0: args += ["--fade-out-seconds", f"{self.ds_fadeout.value():.2f}"]
+
+        intro_txt = self.ed_intro.text().strip()
+        if intro_txt:
+            intro_path = _norm(intro_txt)
+            if Path(intro_path).is_file():
+                args += ["--intro", intro_path]
+
+        outro_txt = self.ed_outro.text().strip()
+        if outro_txt:
+            outro_path = _norm(outro_txt)
+            if Path(outro_path).is_file():
+                args += ["--outro", outro_path]
+
+        if hasattr(self, "cb_lut"):
+            idx = self.cb_lut.currentIndex()
+            if idx > 0:  # 0 = "(none)"
+                lut_path = self.cb_lut.itemData(idx)
+                if lut_path:
+                    args += ["--lut", _norm(lut_path)]
+
+        return args
+
+
 def resource_path(rel: str) -> str:
     base = getattr(sys, "_MEIPASS", Path(__file__).parent)
     return str(Path(base, rel))
@@ -1816,6 +2043,7 @@ class DirDropLineEdit(QtWidgets.QLineEdit):
 def main():
     app = QtWidgets.QApplication(sys.argv)
     app.setWindowIcon(QtGui.QIcon(resource_path("assets/icon.ico")))
+    app.setFont(QtGui.QFont("Segoe UI", 10))
 
     w = PMVeaverQt()
     w.show()
