@@ -1113,12 +1113,8 @@ def build_montage(
     if len(parts) > 1:
         try:
             montage = concatenate_videoclips(parts, method="chain")
-        finally:
-            # Schließe Intro/Outro-Teilclips nach dem Concatenate
-            for c in parts:
-                if c is not montage:
-                    try: c.close()
-                    except Exception: pass
+        except Exception:
+            pass
 
     # --- Optionales Fade-Out am Ende ---
     fade_s = max(0.0, min(fade_out_seconds, target_duration - 0.05))
