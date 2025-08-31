@@ -10,7 +10,7 @@ __version__ = "1.1.0"
 
 APP_TITLE = "PMVeaver"
 
-# Progress-Gewichte
+# Progress weights
 STEP_WEIGHTS = {
     "collecting clips": (0.0, 0.1),
     "building video": (0.1, 0.125),
@@ -19,7 +19,7 @@ STEP_WEIGHTS = {
 }
 STEP_ORDER = list(STEP_WEIGHTS.keys())
 
-# ---------------- Codec-Presets / Profile (aus deinem Tkinter-Original übernommen/vereinfacht) ------------
+# ---------------- Codec presets / profiles (taken from your Tkinter original, simplified) ------------
 CODEC_PRESETS = {
     "libx264":     ["placebo","veryslow","slower","slow","medium","fast","faster","veryfast","superfast","ultrafast"],
     "libx265":     ["placebo","veryslow","slower","slow","medium","fast","faster","veryfast","superfast","ultrafast"],
@@ -44,8 +44,8 @@ RENDER_PROFILES = {
     "Intel GPU (QSV)": {"codec": "h264_qsv",  "preset": "medium",  "threads": "",  "bitrate": "8M"},
 }
 
-ERROR_CSS = "QLineEdit{border:1px solid #d9534f; border-radius:4px;}"  # rot
-OK_CSS    = ""  # Default-Style
+ERROR_CSS = "QLineEdit{border:1px solid #d9534f; border-radius:4px;}"
+OK_CSS    = ""  # Default style
 
 
 def _norm(p: str) -> str:
@@ -55,7 +55,7 @@ def _base_dir() -> Path:
     return Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 
 def _find_cli_candidate():
-    """Bevorzuge pmveaver.exe neben der GUI, sonst pmveaver.py (im selben Ordner)."""
+    """Prefer pmveaver.exe next to the GUI, otherwise pmveaver.py (in the same folder)."""
     base = _base_dir()
     cand_exe = base / "pmveaver.exe"
     if cand_exe.exists():
@@ -63,7 +63,7 @@ def _find_cli_candidate():
     cand_py = base / "pmveaver.py"
     if cand_py.exists():
         return str(cand_py), False
-    # Fallback: im Arbeitsverzeichnis suchen
+    # Fallback: search in working directory
     if Path("pmveaver.exe").exists():
         return "pmveaver.exe", True
     if Path("pmveaver.py").exists():
@@ -129,7 +129,7 @@ class TriangularDistWidget(QtWidgets.QWidget):
                 w = 1.0 - abs(b - mode) / denom
                 ws.append(max(w, MIN_WEIGHT))
 
-        # Normieren für die Darstellung (Y=0..1)
+        # Normalize for visualization (Y=0..1)
         mx = max(ws) if ws else 1.0
         ws = [w / mx for w in ws]
         return evens, ws
@@ -139,12 +139,12 @@ class TriangularDistWidget(QtWidgets.QWidget):
         p.setRenderHint(QtGui.QPainter.Antialiasing, True)
         rect = self.rect().adjusted(6, 6, -6, -6)
 
-        # Hintergrund/ Rahmen
+        # Background / Frame
         p.setPen(QtCore.Qt.NoPen)
         p.setBrush(self.palette().base())
         p.drawRect(rect)
 
-        # Achsen
+        # Axes
         p.setPen(self.palette().mid().color())
         p.drawRect(rect)
 
@@ -152,17 +152,17 @@ class TriangularDistWidget(QtWidgets.QWidget):
         if not evens:
             return
 
-        # Balkenbreite
+        # Bar width
         n = len(evens)
         gap = 4
         bar_w = max(6, (rect.width() - gap*(n+1)) // max(1, n))
 
-        # Textfarbe
+        # Text color
         txt_pen = QtGui.QPen(self.palette().text().color())
 
         # Bars
         x = rect.left() + gap
-        max_h = rect.height()  # Platz für Labels
+        max_h = rect.height()  # Space for labels
         bar_brush = QtGui.QBrush(self.palette().highlight().color())
 
         for i, (b, w) in enumerate(zip(evens, ws)):
@@ -170,7 +170,7 @@ class TriangularDistWidget(QtWidgets.QWidget):
             bar_rect = QtCore.QRect(x, rect.bottom() - h - 24, bar_w, h)
             p.fillRect(bar_rect, bar_brush)
 
-            # Beat-Label
+            # Beat label
             p.setPen(txt_pen)
             lbl = str(b) + ' beats'
             metrics = p.fontMetrics()
@@ -179,7 +179,7 @@ class TriangularDistWidget(QtWidgets.QWidget):
 
             x += bar_w + gap
 
-        # Mode-Marker (vertikale Linie)
+        # Mode marker (vertical line)
         lo, hi, _ = self._even_list(self._min_beats, self._max_beats)
         if hi > lo:
             rel = (self._mode_pos)  # 0..1
@@ -224,10 +224,10 @@ class ConsoleWindow(QtWidgets.QWidget):
         layout.addLayout(btn_row)
 
         self._cr_active = False
-        # ANSI CSI/OSC Sequenzen rausfiltern (Farben, Cursorsteuerung)
+        # Filter out ANSI CSI/OSC sequences (colors, cursor control)
         self._ansi_re = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]|\x1b\]0;.*?\x07')
 
-    # --- Helfer
+    # --- Helpers
     def _cursor_end(self):
         cur = self.edit.textCursor()
         cur.movePosition(QtGui.QTextCursor.End)
@@ -242,7 +242,7 @@ class ConsoleWindow(QtWidgets.QWidget):
         if not s:
             return
 
-        # ANSI raus; Windows CRLF zu \n normalisieren
+        # Remove ANSI; normalize Windows CRLF to \n
         s = s.replace('\r\n', '\n')
         s = self._ansi_re.sub('', s)
 
@@ -252,23 +252,23 @@ class ConsoleWindow(QtWidgets.QWidget):
         else:
             fmt.setForeground(QtGui.QBrush(self.palette().text().color()))
 
-        # Split, Seps behalten -> ['chunk', '\r', 'chunk', '\n', ...]
+        # Split, keep separators -> ['chunk', '\r', 'chunk', '\n', ...]
         parts = re.split(r'(\r|\n)', s)
 
         for tok in parts:
             if tok == '':
                 continue
             if tok == '\r':
-                # Nächster Text ersetzt die aktuelle Zeile (tqdm update)
+                # Next text replaces current line (tqdm update)
                 self._cr_active = True
                 continue
             if tok == '\n':
-                # Neue Zeile erzwingen
+                # Force new line
                 self._cursor_end().insertText('\n')
                 self._cr_active = False
                 continue
 
-            # normaler Text
+            # normal text
             if self._cr_active:
                 self._replace_current_line(tok, fmt)
                 self._cr_active = False
@@ -283,7 +283,7 @@ class ConsoleWindow(QtWidgets.QWidget):
     def _copy_all(self):
         self.edit.selectAll()
         self.edit.copy()
-        # Auswahl zurück ans Ende setzen
+        # Reset selection to end
         self.edit.moveCursor(QtGui.QTextCursor.End)
 
 
@@ -311,7 +311,7 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         self.setWindowTitle(APP_TITLE)
 
-        # --- System-Dark/Light automatisch
+        # --- Automatic system dark/light mode
         qdarktheme.setup_theme(theme="auto", custom_colors={"primary": "#8571c9"})
 
         # ---------- State ----------
@@ -330,11 +330,11 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         # ---------- UI ----------
         self._build_ui()
-        self._apply_profile()        # initiale Profileinstellungen
-        self._sync_preset_choices()  # Preset-Auswahl zum Codec
+        self._apply_profile()        # initial profile settings
+        self._sync_preset_choices()  # preset selection for codec
         self._sync_bpm_ui()
 
-        # Ticker für ETA/Preview
+        # Timer for ETA/preview
         self._timer = QtCore.QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(200)
@@ -427,7 +427,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         # Step/Elapsed/ETA + Progressbars
         right_box = QtWidgets.QVBoxLayout()
 
-        # Current step + Elapsed/ETA des aktuellen Steps
+        # Current step + Elapsed/ETA of the current step
         row1 = QtWidgets.QHBoxLayout()
         row1.addWidget(QtWidgets.QLabel("▼ Current step:"))
         self.lbl_step = QtWidgets.QLabel("—")
@@ -441,7 +441,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         row1.addWidget(self.lbl_eta_step)
         right_box.addLayout(row1)
 
-        # Zeile 2: Step-Progress
+        # Step progress
         row2 = QtWidgets.QHBoxLayout()
         self.pb_step = QtWidgets.QProgressBar()
         self.pb_step.setRange(0, 100)
@@ -449,7 +449,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         row2.addWidget(self.pb_step, stretch=1)
         right_box.addLayout(row2)
 
-        # Zeile 3: Total-Progress
+        # Total progress
         row3 = QtWidgets.QHBoxLayout()
         self.pb_total = QtWidgets.QProgressBar()
         self.pb_total.setRange(0, 100)
@@ -481,7 +481,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         self.btn_start.setSizePolicy(QtWidgets.QSizePolicy.Expanding,
                                      QtWidgets.QSizePolicy.Fixed)
 
-        # größere, fette Schrift
+        # larger, bold font
         f = self.btn_start.font()
         f.setBold(True)
         f.setPointSize(int(f.pointSize() * 1.25))
@@ -522,23 +522,40 @@ class PMVeaverQt(QtWidgets.QWidget):
         main_split.addLayout(left_box, stretch=3)
         main_split.addSpacing(16)
 
-        # ----- Accordion (QToolBox) für alle restlichen Frames
+        acc_container = QtWidgets.QWidget()
+        acc_layout = QtWidgets.QVBoxLayout(acc_container)
+        acc_layout.setContentsMargins(8, 8, 8, 8)
+
+        presets_container = QtWidgets.QWidget()
+        presets_layout = QtWidgets.QHBoxLayout(presets_container)
+        presets_layout.setContentsMargins(0, 0, 0, 8)
+        presets_layout.setSpacing(8)
+        presets_layout.addWidget(QtWidgets.QLabel("Preset: "), stretch=0)
+        presets_layout.addWidget(QtWidgets.QComboBox(), stretch=1)
+        presets_layout.addWidget(QtWidgets.QPushButton("Save Preset"))
+        acc_layout.addWidget(presets_container)
+
+        # ----- Accordion (QToolBox) for settings
         acc = QtWidgets.QToolBox()
         acc.addItem(self._panel_frame_render(), "Frame / Render")
-        acc.addItem(self._panel_effects(), "Filters / Effects")
+        acc.addItem(self._panel_effects(),      "Filters / Effects")
         acc.addItem(self._panel_audio_mix(),    "Audio Mix")
         acc.addItem(self._panel_bpm(),          "BPM / Beat lengths")
         acc.addItem(self._panel_time_fallback(),"Time-based fallback (when BPM disabled)")
         acc.addItem(self._panel_codecs(),       "Codecs / Performance")
-
-        acc_container = QtWidgets.QWidget()
-        acc_layout = QtWidgets.QVBoxLayout(acc_container)
-        acc_layout.setContentsMargins(8, 8, 8, 8)
         acc_layout.addWidget(acc)
 
-        main_split.addWidget(acc_container, stretch=2)
+        settings_group = QtWidgets.QGroupBox("Settings")
+        pg = QtWidgets.QHBoxLayout(settings_group)
+        pg.setSpacing(8)
 
-        # Auto-Größe
+        pg.addWidget(acc_container)
+
+        main_split.addWidget(settings_group, stretch=2)
+
+        main_split.addItem(QtWidgets.QSpacerItem(8, 0))
+
+        # automatic size
         self.resize(1360, 640)
         self.setMinimumWidth(1360)
 
@@ -572,7 +589,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         self.sb_fps.setValue(30.0)
         self.sb_fps.setSuffix(" fps")
 
-        # Alle drei gleichmäßig dehnbar machen
+        # Make all three equally stretchable
         for sb in (self.sb_w, self.sb_h, self.sb_fps):
             sb.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             sb.setMinimumWidth(80)
@@ -600,10 +617,10 @@ class PMVeaverQt(QtWidgets.QWidget):
         g.addWidget(lab_f, 1, 2);
         g.addWidget(self.sb_fps, 1, 3)
 
-        # alle drei Spinbox-Spalten gleich stretchen
+        # Stretch all three spinbox columns equally
         for col in (1, 3):
             g.setColumnStretch(col, 1)
-        # Labels schmal halten
+        # Keep labels narrow
         for col in (0, 2):
             g.setColumnMinimumWidth(col, 80)
 
@@ -615,7 +632,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         g = QtWidgets.QGridLayout(w)
         g.setSpacing(16)
 
-        # Slider (intern 0..200 bzw. 0..100)
+        # Sliders
         def slider(init, to=300):
             s = QtWidgets.QSlider(QtCore.Qt.Horizontal)
             s.setRange(0, to)
@@ -625,7 +642,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         self.sl_contrast = slider(100)
         self.sl_saturation = slider(100)
 
-        # Editierbare Zahlenfelder (anzeigen + tippen erlaubt)
+        # Editable numeric fields (display + typing allowed)
         def dspin(minv, maxv, init, step=1, suffix="%"):
             ds = QtWidgets.QDoubleSpinBox()
             ds.setRange(minv, maxv)
@@ -639,7 +656,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         self.ds_contrast = dspin(0, 300, 100)
         self.ds_saturation = dspin(0, 300, 100)
 
-        # Bidirektionale Verdrahtung (Slider <-> SpinBox)
+        # Bidirectional binding (Slider <-> SpinBox)
         self.sl_contrast.valueChanged.connect(lambda v: self.ds_contrast.setValue(v))
         self.ds_contrast.valueChanged.connect(lambda val: self.sl_contrast.setValue(int(round(val))))
         self.sl_contrast.valueChanged.connect(lambda _: self._update_lut_preview())
@@ -659,7 +676,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         g.addWidget(self.sl_saturation, 1, 1, 1, 3)
         g.addWidget(self.ds_saturation, 1, 4)
 
-        # --- 3D LUT Auswahl ---
+        # --- 3D LUT selection ---
         self.cb_lut = QtWidgets.QComboBox()
         btn_lut_reload = QtWidgets.QPushButton(" Reload")
         btn_lut_reload.setIcon(self.qicon_from_glyph("\ue5d5"))
@@ -671,7 +688,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         g.addWidget(btn_lut_reload, 2, 4)
 
         btn_lut_reload.clicked.connect(lambda: (self._scan_luts(), self._update_lut_preview()))
-        QtCore.QTimer.singleShot(0, self._scan_luts)  # initial befüllen, wenn UI steht
+        QtCore.QTimer.singleShot(0, self._scan_luts)  # populate initially once UI is ready
 
         self.chk_pulse = QtWidgets.QCheckBox("Beat pulse effect")
         g.addWidget(self.chk_pulse, 3, 0, 1, 2)
@@ -686,19 +703,18 @@ class PMVeaverQt(QtWidgets.QWidget):
         g.addWidget(lab_fadeout, 3, 3)
         g.addWidget(self.ds_fadeout, 3, 4)
 
-        # --- LUT Preview (kleine Live-Vorschau) ---
+        # --- LUT Preview ---
         self.lbl_lut_preview = QtWidgets.QLabel()
-        self.lbl_lut_preview.setFixedSize(384, 107)  # wie deine Render-Preview
+        self.lbl_lut_preview.setFixedHeight(140)
         self.lbl_lut_preview.setFrameShape(QtWidgets.QFrame.Panel)
         self.lbl_lut_preview.setFrameShadow(QtWidgets.QFrame.Sunken)
         self.lbl_lut_preview.setAlignment(QtCore.Qt.AlignCenter)
-        g.addWidget(QtWidgets.QLabel("Preview"), 5, 0)
-        g.addWidget(self.lbl_lut_preview, 5, 1, 1, 4)
+        g.addWidget(self.lbl_lut_preview, 5, 0, 1, 5)
 
         # Signale
         self.cb_lut.currentIndexChanged.connect(self._update_lut_preview)
-        QtCore.QTimer.singleShot(0, self._scan_luts)  # Liste initial befüllen
-        QtCore.QTimer.singleShot(50, self._update_lut_preview)  # und gleich eine Preview zeigen
+        QtCore.QTimer.singleShot(0, self._scan_luts)  # initially populate list
+        QtCore.QTimer.singleShot(50, self._update_lut_preview)  # and show a preview immediately
 
         # alle drei Spinbox-Spalten gleich stretchen
         for col in (1, 3):
@@ -715,7 +731,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         g = QtWidgets.QGridLayout(w)
         g.setSpacing(16)
 
-        # Slider (intern 0..200 bzw. 0..100)
+        # Sliders (internally 0..200 or 0..100)
         def slider(init, to=200):
             s = QtWidgets.QSlider(QtCore.Qt.Horizontal)
             s.setRange(0, to)
@@ -726,7 +742,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         self.sl_clip = slider(80)  # 0.80x
         self.sl_rev = slider(20, to=100)  # 0.20
 
-        # Editierbare Zahlenfelder (anzeigen + tippen erlaubt)
+        # Editable numeric fields (display + manual typing allowed)
         def dspin(minv, maxv, init, step=1, suffix="%"):
             ds = QtWidgets.QDoubleSpinBox()
             ds.setRange(minv, maxv)
@@ -741,7 +757,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         self.ds_clip = dspin(0, 200, 80)
         self.ds_rev = dspin(0, 100, 20)
 
-        # Bidirektionale Verdrahtung (Slider <-> SpinBox)
+        # Bidirectional binding (Slider <-> SpinBox)
         self.sl_bg.valueChanged.connect(lambda v: self.ds_bg.setValue(v))
         self.ds_bg.valueChanged.connect(lambda val: self.sl_bg.setValue(int(round(val))))
 
@@ -835,16 +851,16 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         self.sl_beat_mode.valueChanged.connect(_sync_from_slider)
 
-        # Änderungen an Min/Max aktualisieren die Grafik
+        # Changing min/max updates the graph
         self.sb_min_beats.valueChanged.connect(lambda _: self._update_dist_plot())
         self.sb_max_beats.valueChanged.connect(lambda _: self._update_dist_plot())
 
         QtCore.QTimer.singleShot(0, self._update_dist_plot)
 
-        # alle drei Spinbox-Spalten gleich stretchen
+        # stretch all three spinbox columns equally
         for col in (1, 3):
             g.setColumnStretch(col, 1)
-        # Labels schmal halten
+        # keep labels narrow
         for col in (0, 2):
             g.setColumnMinimumWidth(col, 80)
 
@@ -873,7 +889,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         self.ds_max_seconds.setValue(5.00)
         self.ds_max_seconds.setSuffix(" s")
 
-        # gleichmäßig dehnbar
+        # Evenly stretchable
         for sb in (self.ds_min_seconds, self.ds_max_seconds):
             sb.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
             sb.setMinimumWidth(80)
@@ -894,7 +910,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         for col in (0, 2):  # Labels schmal halten
             g.setColumnMinimumWidth(col, 90)
 
-        # Konsistenz: min ≤ max
+        # Consistency: min ≤ max
         self.ds_min_seconds.valueChanged.connect(
             lambda v: self.ds_max_seconds.setValue(max(self.ds_max_seconds.value(), v))
         )
@@ -944,13 +960,13 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         args = self._build_args()
         if not args:
-            QtWidgets.QMessageBox.warning(self, "Missing input", "Bitte Audio/Video/Output prüfen.")
+            QtWidgets.QMessageBox.warning(self, "Missing input", "Please check audio/video/output.")
             return
 
         cli, is_exe = _find_cli_candidate()
         if cli is None:
             QtWidgets.QMessageBox.critical(self, "Not found",
-                                           "pmveaver.exe / pmveaver.py wurde nicht gefunden.\nLege es neben diese GUI.")
+                                           "pmveaver.exe / pmveaver.py not found.\nPlace it next to this GUI.")
             return
 
         out_txt = _norm(self.ed_output.text().strip())
@@ -1129,7 +1145,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         return None
 
     def _is_tqdm_line(self, s: str) -> bool:
-        # sehr tolerant: Prozent + Balken + Klammerblock
+        # Very tolerant: percent + bar + bracket block
         return ("%|" in s) and ("[" in s and "]" in s)
 
     def _parse_tqdm_progress(self, text: str):
@@ -1165,7 +1181,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         elif key.startswith("aborted") or key.startswith("failed"):
             self.lbl_step.setStyleSheet("color: #d12f2f;")
 
-        # Step-Reset (nur Step, nicht Total)
+        # Step reset (only step, not total)
         self._last_step_pct = 0
         self.pb_step.setValue(0)
         self.lbl_elapsed_step.setText("Elapsed (Current step): —")
@@ -1200,7 +1216,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         self._last_step_pct = pct
         self.pb_step.setValue(int(pct))
 
-        # in Gesamtfortschritt mappen per STEP_WEIGHTS
+        # Map into overall progress using STEP_WEIGHTS
         start, end = STEP_WEIGHTS.get(self._phase, (0.0, 1.0))
         total = start*100.0 + (end-start)*pct
         total = max(0.0, min(100.0, total))
@@ -1209,13 +1225,13 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         if self.chk_preview.isChecked():
             now = time.time()
-            # alle 1.0 s oder wenn wir ~fertig sind → neu laden
+            # Reload every 1.0 s or when almost finished
             if (now - self._last_preview_check) > 1.0 or (pct is not None and float(pct) >= 99.0):
                 self._try_load_preview(force=True)
                 self._last_preview_check = now
 
     def _tick(self):
-        # Nur Gesamtzeit seit Start anzeigen
+        # Show only total elapsed time since start
         if self.running:
             if self._start_time is None:
                 self._start_time = time.time()
@@ -1302,16 +1318,16 @@ class PMVeaverQt(QtWidgets.QWidget):
 
     def _add_video_row(self, path: str = "", weight_text: str = ""):
         """
-        Fügt eine Zeile hinzu: [Pfad-QLineEdit][Browse…][Gewicht-QLineEdit ('1' implizit)]
-        Auto-Append: Sobald die letzte Zeile einen Pfad bekommt, wird eine neue leere Zeile erzeugt.
+        Adds a row: [Path-QLineEdit][Browse…][Weight-QLineEdit ('1' implicit)]
+        Auto-append: As soon as the last row gets a path, a new empty row is created.
         """
         row_w = QtWidgets.QWidget()
-        h = QtWidgets.QHBoxLayout(row_w);
-        h.setContentsMargins(0, 0, 0, 0);
+        h = QtWidgets.QHBoxLayout(row_w)
+        h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(6)
 
         ed_path = DirDropLineEdit()
-        ed_path.setPlaceholderText("Video-Ordner auswählen…")
+        ed_path.setPlaceholderText("Select video folder…")
         if path: ed_path.setText(_norm(path))
 
         btn_browse = self.IconButton("\ue2c7")
@@ -1319,13 +1335,13 @@ class PMVeaverQt(QtWidgets.QWidget):
         ed_weight = QtWidgets.QLineEdit()
         ed_weight.setPlaceholderText("1")  # leere Eingabe ⇒ Gewicht = 1
         ed_weight.setFixedWidth(60)
-        # Nur positive Integer zulassen (optional)
+        # Allow only positive integers (optional)
         int_validator = QtGui.QIntValidator(1, 99999, self)
         ed_weight.setValidator(int_validator)
         if weight_text:
             ed_weight.setText(weight_text.strip())
 
-        # Stretch so verteilen, dass Pfad schön breit ist
+        # Distribute stretch so that path field is wide
         ed_path.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
 
         h.addWidget(ed_path, 1)
@@ -1333,12 +1349,12 @@ class PMVeaverQt(QtWidgets.QWidget):
         h.addWidget(ed_weight, 0)
         h.addWidget(btn_browse, 0)
 
-        # Zeilen-Objekt in Liste halten
+        # Keep row object in list
         row_obj = {"w": row_w, "path": ed_path, "weight": ed_weight, "btn": btn_browse}
         self.video_rows.append(row_obj)
         self.videos_layout.addWidget(row_w)
 
-        # Browse-Handler (für diese Zeile)
+        # Browse handler (for this row)
         def _browse_this_row():
             start_dir = _norm(ed_path.text().strip()) or _norm(os.getcwd())
             d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select video folder", start_dir)
@@ -1348,12 +1364,12 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         btn_browse.clicked.connect(_browse_this_row)
 
-        # Auto-Append, wenn letzte Zeile befüllt wird
+        # Auto-append when last row is filled
         def _maybe_append_new(v: str):
-            # nur reagieren, wenn dies die *letzte* Zeile ist
+            # react only if this is the *last* row
             if row_obj is self.video_rows[-1]:
                 if v.strip():
-                    # aber nur, wenn noch keine leere Abschlusszeile existiert
+                    # but only if no empty trailing row exists yet
                     self._add_video_row()
             self._validate_inputs(False)
 
@@ -1361,8 +1377,8 @@ class PMVeaverQt(QtWidgets.QWidget):
 
     def _iter_filled_video_rows(self):
         """
-        Generator über befüllte Pfad-Zeilen (Pfad ≠ leer).
-        Liefert Tupel (path_norm, weight_int_or_1, original_weight_text)
+        Generator over filled path rows (path ≠ empty).
+        Yields tuples (path_norm, weight_int_or_1, original_weight_text)
         """
         for r in self.video_rows:
             p = r["path"].text().strip()
@@ -1375,9 +1391,9 @@ class PMVeaverQt(QtWidgets.QWidget):
 
     def _build_videos_arg(self) -> str:
         """
-        Baut den *einen* String für --videos:
+        Builds the single string for --videos:
         "DIR[:weight],DIR[:weight],..."
-        Weight wird nur angehängt, wenn != 1.
+        Weight is only appended if != 1.
         """
         parts = []
         for p, w, _wt in self._iter_filled_video_rows():
@@ -1389,9 +1405,9 @@ class PMVeaverQt(QtWidgets.QWidget):
 
     def _check_video_rows_valid(self) -> bool:
         """
-        Validiert: Jeder gefüllte Pfad muss ein existierendes Verzeichnis sein.
-        Gewicht (falls angegeben) muss gültig (≥1) sein – das stellt der Validator sicher.
-        Mindestens *eine* Zeile muss gefüllt sein.
+        Validation: Each filled path must be an existing directory.
+        Weight (if specified) must be valid (≥1) – ensured by the validator.
+        At least *one* row must be filled.
         """
         any_filled = False
         for r in self.video_rows:
@@ -1402,13 +1418,13 @@ class PMVeaverQt(QtWidgets.QWidget):
             p = _norm(path_txt)
             if not Path(p).is_dir():
                 return False
-            # weight leer ⇒ 1; falls gesetzt, ist es dank Validator ok
+            # empty weight ⇒ 1; if set, it’s valid thanks to validator
         return any_filled
 
     def _set_video_rows_from_guess(self, guess_path: str | None):
         """
-        Wird beim Start/Autofill verwendet: setzt die *erste* Zeile auf guess_path,
-        wenn diese noch leer ist.
+        Used at startup/autofill: sets the *first* row to guess_path,
+        if it is still empty.
         """
         if not guess_path:
             return
@@ -1417,11 +1433,11 @@ class PMVeaverQt(QtWidgets.QWidget):
 
     def _normalize_videos_text(self, txt: str) -> str:
         """
-        Normalisiert die Eingabe:
-        - trimmt Leerzeichen um Kommas/Colon,
-        - entfernt leere Segmente,
-        - lässt Gewicht (falls vorhanden) unverändert.
-        Gibt einen einzigen String zurück, der direkt an --videos geht.
+        Normalizes the input:
+        - trims spaces around commas/colon,
+        - removes empty segments,
+        - keeps weight (if present) unchanged.
+        Returns a single string passed directly to --videos.
         """
         parts = []
         for raw in txt.split(","):
@@ -1439,8 +1455,8 @@ class PMVeaverQt(QtWidgets.QWidget):
 
     def _check_video_dirs(self, txt: str) -> bool:
         """
-        Prüft, ob jeder vor dem ':' stehende Teil ein existierendes Verzeichnis ist.
-        (Gewicht wird ignoriert, kann beliebig sein – CLI prüft Semantik.)
+        Checks if every part before ':' is an existing directory.
+        (Weight is ignored, can be arbitrary – CLI checks semantics.)
         """
         if not txt.strip():
             return False
@@ -1483,7 +1499,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         self._validate_inputs(False)
 
     def _scan_luts(self):
-        """Listen ./luts/ im Arbeitsverzeichnis und fülle die LUT-Auswahl."""
+        """List ./luts/ in working directory and populate LUT selection."""
         lut_dir = Path(_norm(os.path.join(os.getcwd(), "luts")))
         items: list[str] = []
 
@@ -1502,14 +1518,14 @@ class PMVeaverQt(QtWidgets.QWidget):
             name = os.path.basename(it)
             self.cb_lut.addItem(name, it)
 
-        # Hilfreiche Hinweise
-        tip = "3D-LUTs werden aus dem Unterordner ./luts des Arbeitsverzeichnisses geladen."
+        # Helpful hints
+        tip = "3D LUTs are loaded from the ./luts subfolder of the working directory."
         if not items:
-            tip += " (Keine Dateien gefunden – unterstützte Endungen: .cube, .3dl, .lut)"
+            tip += " (No files found – supported extensions: .cube, .3dl, .lut)"
         self.cb_lut.setToolTip(tip)
 
     def _lut_sample_path(self) -> str:
-        """Erzeuge einmal ein farbiges Testbild (PNG) für LUT-Vorschauen und liefere den Pfad."""
+        """Generate a colored test image (PNG) for LUT previews and return the path."""
         if hasattr(self, "_lut_sample_file") and self._lut_sample_file and Path(self._lut_sample_file).exists():
             return self._lut_sample_file
 
@@ -1517,12 +1533,12 @@ class PMVeaverQt(QtWidgets.QWidget):
         tmp.mkdir(exist_ok=True)
         p = tmp / "lut_sample.png"
 
-        # 256x144, Farbfelder + Gradienten
+        # Color blocks + gradients
         w, h = 384, 107
         img = QtGui.QImage(w, h, QtGui.QImage.Format_RGB32)
         painter = QtGui.QPainter(img)
 
-        # 1) Farb-Grid (oben)
+        # 1) Color grid (top)
         cell_w, cell_h = w // 8, h // 3
         for i in range(8):
             for j in range(1):
@@ -1531,7 +1547,7 @@ class PMVeaverQt(QtWidgets.QWidget):
                 b = int(255 * ((7 - i) / 7))
                 painter.fillRect(i * cell_w, j * cell_h, cell_w, cell_h, QtGui.QColor(r, g, b))
 
-        # 2) Horizontaler RGB-Gradient (Mitte)
+        # 2) Horizontal RGB gradient (middle)
         y0 = cell_h
         for x in range(w):
             t = x / (w - 1)
@@ -1539,7 +1555,7 @@ class PMVeaverQt(QtWidgets.QWidget):
             painter.setPen(color)
             painter.drawLine(x, y0, x, y0 + cell_h - 1)
 
-        # 3) Sättigungs-Gradient (unten)
+        # 3) Saturation gradient (bottom)
         y1 = 2 * cell_h
         for y in range(cell_h):
             sat = y / max(1, cell_h - 1)
@@ -1564,8 +1580,8 @@ class PMVeaverQt(QtWidgets.QWidget):
         return paths
 
     def _update_lut_preview(self):
-        """Erzeugt eine LUT-Preview als Collage (Foto + Farbgrid) via FFmpeg und zeigt sie an."""
-        # --- Quellen besorgen ---
+        """Generate a LUT preview as a collage (photo + color grid) via FFmpeg and display it."""
+        # --- Get sources ---
         try:
             samples = self._lut_samples()  # optional: Foto + Grid
         except AttributeError:
@@ -1576,13 +1592,13 @@ class PMVeaverQt(QtWidgets.QWidget):
             self.lbl_lut_preview.setText("No sample")
             return
 
-        # --- FFmpeg suchen ---
+        # --- Find FFmpeg ---
         ffm, _ = self._which_ffmpeg_bins()
         if not ffm:
             self.lbl_lut_preview.setText("FFmpeg not found")
             return
 
-        # --- LUT-Auswahl prüfen ---
+        # --- Check LUT selection ---
         use_lut = False
         lut_esc = ""
         if hasattr(self, "cb_lut"):
@@ -1636,7 +1652,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         fc = ";".join(chains) + ";" + "".join(outs) + f"hstack=inputs={len(samples)}[out]"
         args += ["-filter_complex", fc, "-map", "[out]", "-frames:v", "1", str(out_png)]
 
-        # --- Vorherige Preview-Jobs abbrechen ---
+        # --- Abort previous preview jobs ---
         if hasattr(self, "_lut_prev_proc") and self._lut_prev_proc:
             try:
                 self._lut_prev_proc.kill()
@@ -1668,8 +1684,8 @@ class PMVeaverQt(QtWidgets.QWidget):
 
     def _autofill_video_folder(self):
         """
-        Versucht sinnvolle Standard-Ordner zu finden und setzt *erste Zeile* darauf,
-        falls sie noch leer ist.
+        Try to find sensible default folders and set the *first row* to one,
+        if it is still empty.
         """
         names = ["videos", "clips", "input", "inputs", "source", "sources", "footage"]
         bases = []
@@ -1697,9 +1713,9 @@ class PMVeaverQt(QtWidgets.QWidget):
 
     def _autofill_output_from_audio(self):
         """
-        Falls ein Audiofile gesetzt ist, Output automatisch auf
-        denselben Namen mit .mp4 im selben Ordner stellen,
-        wenn Output noch leer ist oder gerade überschrieben werden soll.
+        If an audio file is set, automatically set output to
+        the same name with .mp4 in the same folder,
+        if output is still empty or about to be overwritten.
         """
         audio = _norm(self.ed_audio.text().strip())
         if not audio:
@@ -1708,7 +1724,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         p = Path(audio)
         if p.exists() and p.is_file():
             candidate = p.with_suffix(".mp4")
-            # Nur setzen, wenn das Output-Feld leer ist oder noch Standard enthält
+            # Only set if the output field is empty or still contains the default
             if not self.ed_output.text().strip():
                 self.ed_output.setText(str(candidate))
 
@@ -1718,7 +1734,7 @@ class PMVeaverQt(QtWidgets.QWidget):
 
     @staticmethod
     def _which_ffmpeg_bins():
-        """Suche ffmpeg/ffprobe in PATH, ansonsten neben der EXE/GUI."""
+        """Search for ffmpeg/ffprobe in PATH, otherwise next to EXE/GUI."""
         ffm, ffp = shutil.which("ffmpeg"), shutil.which("ffprobe")
         if not ffm or not ffp:
             base = _base_dir()
@@ -1754,7 +1770,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         return super().eventFilter(obj, event)
 
     def _apply_preview_pixmap(self):
-        # skaliert das aktuell geladene Bild passend zur Labelgröße
+        # scales the currently loaded image to the label size
         area = self.lbl_preview.size()
         if self._preview_pix and area.width() > 0 and area.height() > 0:
             self.lbl_preview.setPixmap(
@@ -1783,22 +1799,22 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         self._set_field_state(
             self.ed_audio, ok_audio,
-            "Audio-Datei ist gesetzt.",
-            "Bitte eine existierende Audio-Datei wählen."
+            "Audio file is set.",
+            "Please select an existing audio file."
         )
         self._set_field_state(
             self.ed_output, ok_out,
-            "Ausgabedatei ist gesetzt.",
-            "Bitte einen gültigen Ausgabepfad angeben."
+            "Output file is set.",
+            "Please specify a valid output path."
         )
 
         if ok_vdir:
             self.videos_container.setStyleSheet("")
-            self.videos_container.setToolTip("Video-Ordner/Liste ist gültig.")
+            self.videos_container.setToolTip("Video folder/list is valid.")
         else:
             # Leichte rote Outline als Hinweis
             self.videos_container.setStyleSheet("QWidget { border: 1px solid #d9534f; border-radius: 4px; }")
-            self.videos_container.setToolTip("Bitte gültige(n) Ordner angeben. Leere Gewichtung bedeutet 1.")
+            self.videos_container.setToolTip("Please specify valid folder(s). Empty weighting means 1.")
 
         all_ok = ok_audio and ok_vdir and ok_out
 
@@ -1807,17 +1823,17 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         if show_message and not all_ok:
             missing = []
-            if not ok_audio: missing.append("Audio-Datei")
-            if not ok_vdir:  missing.append("Video-Ordner")
-            if not ok_out:   missing.append("Ausgabedatei")
+            if not ok_audio: missing.append("Audio file")
+            if not ok_vdir:  missing.append("Video folder")
+            if not ok_out:   missing.append("Output filder")
             QtWidgets.QMessageBox.warning(
-                self, "Pflichtfelder fehlen",
-                "Bitte folgende Felder prüfen:\n• " + "\n• ".join(missing)
+                self, "Required fields are missing",
+                "Please check the following fields:\n• " + "\n• ".join(missing)
             )
         return all_ok
 
     def _next_numbered_path(self, p: Path) -> Path:
-        """Erzeuge 'name (1).ext', 'name (2).ext', ... bis frei."""
+        """Generate 'name (1).ext', 'name (2).ext', ... until free."""
         stem, suf = p.stem, p.suffix
         i = 1
         while True:
@@ -1828,29 +1844,33 @@ class PMVeaverQt(QtWidgets.QWidget):
 
     def _handle_output_conflict(self, p: Path) -> bool:
         """
-        Zeigt eine Auswahl:
-          - Überschreiben
-          - Umbenennen ➜ name (1).ext
-          - Abbrechen
-        Rückgabe: True = fortfahren, False = abbrechen
+        Show a choice:
+          - Overwrite
+          - Rename ➜ name (1).ext
+          - Cancel
+        Return: True = continue, False = abort
         """
         if not p.exists():
             return True
         if p.is_dir():
-            QtWidgets.QMessageBox.warning(self, "Ungültiger Pfad",
-                                          "Der angegebene Ausgabepfad ist ein Ordner. Bitte eine Datei wählen.")
+            QtWidgets.QMessageBox.warning(self, "Invalid path",
+                                          "The specified output path is a folder. Please select a file.")
             return False
 
         cand = self._next_numbered_path(p)
 
         m = QtWidgets.QMessageBox(self)
-        m.setWindowTitle("Datei existiert bereits")
+        m.setWindowTitle("File already exists")
         m.setIcon(QtWidgets.QMessageBox.Warning)
-        m.setText(f"Die Ausgabedatei existiert bereits:\n{p}\n\nWas möchtest du tun?")
-        btn_over = m.addButton("Überschreiben", QtWidgets.QMessageBox.DestructiveRole)
-        btn_ren = m.addButton(f"Umbenennen → {cand.name}", QtWidgets.QMessageBox.ActionRole)
-        btn_cancel = m.addButton("Abbrechen", QtWidgets.QMessageBox.RejectRole)
+        m.setText(f"The output file already exists:\n{p}\n\nWhat do you want to do?")
+        btn_over = m.addButton("Overwrite", QtWidgets.QMessageBox.DestructiveRole)
+        btn_ren = m.addButton("Rename", QtWidgets.QMessageBox.ActionRole)
+        btn_cancel = m.addButton("Cancel", QtWidgets.QMessageBox.RejectRole)
+        m.setStyleSheet(
+            f"QPushButton {{ min-width: 80px; }}"
+        )
         m.exec()
+
 
         clicked = m.clickedButton()
         if clicked is btn_over:
@@ -1873,7 +1893,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         return btn
 
     def qicon_from_glyph(self, glyph: str) -> QtGui.QIcon:
-        # Farbe aus Palette, wenn nicht vorgegeben
+        # Take color from palette if not explicitly specified
         pal = QtWidgets.QApplication.palette()
         col_norm = pal.buttonText().color()
         col_dis = pal.color(QtGui.QPalette.Disabled, QtGui.QPalette.ButtonText)
@@ -1958,7 +1978,7 @@ class PMVeaverQt(QtWidgets.QWidget):
                 "--max-seconds", f"{self.ds_max_seconds.value():.2f}"
             ]
 
-        # Preview explizit mit true/false
+        # Explicitly set preview to true/false
         args += ["--preview", "true" if self.chk_preview.isChecked() else "false"]
 
         if self.chk_pulse.isChecked(): args += ["--pulse-effect"]
@@ -1993,7 +2013,7 @@ def resource_path(rel: str) -> str:
     return str(Path(base, rel))
 
 class FileDropLineEdit(QtWidgets.QLineEdit):
-    """QLineEdit, das Datei-Drops akzeptiert (optional: Ext-Whitelist)."""
+    """"QLineEdit that accepts file drops (optional: extension whitelist)."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
@@ -2017,7 +2037,7 @@ class FileDropLineEdit(QtWidgets.QLineEdit):
         e.acceptProposedAction()
 
 class DirDropLineEdit(QtWidgets.QLineEdit):
-    """QLineEdit, das Ordner-Drops akzeptiert."""
+    """QLineEdit that accepts folder drops."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
