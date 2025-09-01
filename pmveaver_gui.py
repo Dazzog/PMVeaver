@@ -6,9 +6,9 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import qdarktheme
 import builtins
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
-APP_TITLE = "PMVeaver"
+APP_TITLE = "PMVeaver v" + __version__
 
 # Progress weights
 STEP_WEIGHTS = {
