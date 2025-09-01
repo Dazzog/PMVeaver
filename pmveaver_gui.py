@@ -1,5 +1,5 @@
 # pmveaver_gui.py
-import os, sys, re, time, shutil
+import os, sys, re, time, shutil, json
 from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -342,6 +342,7 @@ class PMVeaverQt(QtWidgets.QWidget):
     # ===================== UI =====================
     def _build_ui(self):
         root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 16, 24)
 
         main_split = QtWidgets.QHBoxLayout()
         root.addLayout(main_split, stretch=1)
@@ -531,8 +532,19 @@ class PMVeaverQt(QtWidgets.QWidget):
         presets_layout.setContentsMargins(0, 0, 0, 8)
         presets_layout.setSpacing(8)
         presets_layout.addWidget(QtWidgets.QLabel("Preset: "), stretch=0)
-        presets_layout.addWidget(QtWidgets.QComboBox(), stretch=1)
-        presets_layout.addWidget(QtWidgets.QPushButton("Save Preset"))
+
+        self.cb_preset = QtWidgets.QComboBox();
+        presets_layout.addWidget(self.cb_preset, stretch=1)
+        QtCore.QTimer.singleShot(0, self._scan_presets)  # initially populate list
+
+        btn_preset_load = QtWidgets.QPushButton("Load Preset")
+        btn_preset_load.clicked.connect(self._load_preset)
+        presets_layout.addWidget(btn_preset_load)
+
+        btn_preset_save = QtWidgets.QPushButton("Save Preset")
+        btn_preset_save.clicked.connect(self._save_preset)
+        presets_layout.addWidget(btn_preset_save)
+
         acc_layout.addWidget(presets_container)
 
         # ----- Accordion (QToolBox) for settings
@@ -705,7 +717,7 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         # --- LUT Preview ---
         self.lbl_lut_preview = QtWidgets.QLabel()
-        self.lbl_lut_preview.setFixedHeight(140)
+        self.lbl_lut_preview.setFixedHeight(110)
         self.lbl_lut_preview.setFrameShape(QtWidgets.QFrame.Panel)
         self.lbl_lut_preview.setFrameShadow(QtWidgets.QFrame.Sunken)
         self.lbl_lut_preview.setAlignment(QtCore.Qt.AlignCenter)
@@ -929,7 +941,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         self.cb_profile = QtWidgets.QComboBox(); self.cb_profile.addItems(list(RENDER_PROFILES.keys()))
         self.cb_codec   = QtWidgets.QComboBox(); self.cb_codec.addItems(list(CODEC_PRESETS.keys()))
         self.cb_audio   = QtWidgets.QComboBox(); self.cb_audio.addItems(["aac","libopus","libmp3lame"])
-        self.cb_preset  = QtWidgets.QComboBox()
+        self.cb_codec_preset  = QtWidgets.QComboBox()
 
         self.ed_bitrate = QtWidgets.QLineEdit(); self.ed_bitrate.setPlaceholderText("Bitrate (e.g., 8M)")
         self.ed_threads = QtWidgets.QLineEdit(); self.ed_threads.setPlaceholderText("Threads")
@@ -943,7 +955,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         g.addWidget(QtWidgets.QLabel("Video codec"),      1,0); g.addWidget(self.cb_codec,   1,1)
         g.addWidget(QtWidgets.QLabel("Audio codec"),      1,2); g.addWidget(self.cb_audio,   1,3)
 
-        g.addWidget(QtWidgets.QLabel("Codec Preset"),     2,0); g.addWidget(self.cb_preset,  2,1)
+        g.addWidget(QtWidgets.QLabel("Codec Preset"),     2,0); g.addWidget(self.cb_codec_preset,  2,1)
 
         g.addWidget(QtWidgets.QLabel("Bitrate"),          3,0); g.addWidget(self.ed_bitrate, 3,1)
         g.addWidget(QtWidgets.QLabel("Threads"),          3,2); g.addWidget(self.ed_threads, 3,3)
@@ -1296,15 +1308,15 @@ class PMVeaverQt(QtWidgets.QWidget):
     def _sync_preset_choices(self):
         codec = self.cb_codec.currentText()
         presets = CODEC_PRESETS.get(codec, [])
-        self.cb_preset.clear()
+        self.cb_codec_preset.clear()
         if presets:
-            self.cb_preset.addItems(presets)
+            self.cb_codec_preset.addItems(presets)
             default = DEFAULT_PRESET_BY_CODEC.get(codec, presets[0])
-            idx = self.cb_preset.findText(default)
-            self.cb_preset.setCurrentIndex(idx if idx >= 0 else 0)
-            self.cb_preset.setEnabled(True)
+            idx = self.cb_codec_preset.findText(default)
+            self.cb_codec_preset.setCurrentIndex(idx if idx >= 0 else 0)
+            self.cb_codec_preset.setEnabled(True)
         else:
-            self.cb_preset.setEnabled(False)
+            self.cb_codec_preset.setEnabled(False)
 
     def _browse_audio(self):
         start_dir = _norm(self.ed_audio.text().strip()) or _norm(os.getcwd())
@@ -1505,13 +1517,11 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         if lut_dir.exists() and lut_dir.is_dir():
             exts = [".cube", ".3dl", ".lut"]
-            # Alle gewünschten Endungen einsammeln
             for ext in exts:
                 for p in sorted(lut_dir.glob(f"*{ext}")):
                     if p.is_file():
                         items.append(str(p))
 
-        # Combo neu befüllen
         self.cb_lut.clear()
         self.cb_lut.addItem("(none)")
         for it in items:
@@ -1681,6 +1691,127 @@ class PMVeaverQt(QtWidgets.QWidget):
             self.lbl_lut_preview.setPixmap(pix)
         else:
             self.lbl_lut_preview.setText("preview failed")
+
+    def _scan_presets(self):
+        """List ./presets/ in working directory and populate preset selection."""
+        lut_dir = Path(_norm(os.path.join(os.getcwd(), "presets")))
+        items: list[str] = []
+
+        if lut_dir.exists() and lut_dir.is_dir():
+            exts = [".json"]
+            for ext in exts:
+                for p in sorted(lut_dir.glob(f"*{ext}")):
+                    if p.is_file():
+                        items.append(str(p))
+
+        self.cb_preset.clear()
+        for it in items:
+            name = os.path.basename(it)
+            self.cb_preset.addItem(name, it)
+
+        # Helpful hints
+        tip = "Presets are loaded from the ./presets subfolder of the working directory."
+        if not items:
+            tip += " (No files found – supported extensions: .json)"
+        self.cb_preset.setToolTip(tip)
+
+    def _save_preset(self):
+        preset_data = {
+            "width": self.sb_w.value(),
+            "height": self.sb_h.value(),
+            "triptych-carry": self.ds_triptych_carry.value(),
+            "fps": self.sb_fps.value(),
+
+            "contrast": self.sl_contrast.value(),
+            "saturation": self.sl_saturation.value(),
+            "lut": self.cb_lut.itemData(self.cb_lut.currentIndex()),
+            "pulse-effect": self.chk_pulse.isChecked(),
+            "fade-out-seconds": self.ds_fadeout.value(),
+
+            "bg-volume": self.sl_bg.value(),
+            "clip-volume": self.sl_clip.value(),
+            "clip-reverb": self.sl_rev.value(),
+
+            "bpm-detect": self.chk_bpm.isChecked(),
+            "bpm": self.ed_bpm.text(),
+            "min-beats": self.sb_min_beats.value(),
+            "max-beats": self.sb_max_beats.value(),
+            "beat-mode": self.ds_beat_mode.value(),
+
+            "min-seconds": self.ds_min_seconds.value(),
+            "max-seconds": self.ds_max_seconds.value(),
+
+            "codec": self.cb_codec.currentText(),
+            "preset": self.cb_codec_preset.currentText(),
+            "bitrate": self.ed_bitrate.text(),
+            "threads": self.ed_threads.text(),
+            "preview": self.chk_preview.isChecked(),
+        }
+
+        preset_name, ok = QtWidgets.QInputDialog.getText(
+            None,
+            "Name preset",
+            "Please enter a name for your preset:",
+        )
+
+        if ok and preset_name.strip():
+            preset_name = preset_name.strip() + ".json"
+            preset_dir = "./presets"
+            preset_path = os.path.join(preset_dir, preset_name)
+
+            os.makedirs(preset_dir, exist_ok=True)
+
+            with open(preset_path, "w", encoding="utf-8") as f:
+                json.dump(preset_data, f, ensure_ascii=False, indent=4)
+
+            self._scan_presets()
+
+    def _load_preset(self):
+        idx = self.cb_preset.currentIndex()
+        preset_path = self.cb_preset.itemData(idx)
+        if preset_path:
+            with open(preset_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            self.sb_w.setValue(int(data["width"]))
+            self.sb_h.setValue(int(data["height"]))
+            self.ds_triptych_carry.setValue(float(data["triptych-carry"]))
+            self.sb_fps.setValue(int(data["fps"]))
+
+            self.sl_contrast.setValue(int(data["contrast"]))
+            self.sl_saturation.setValue(int(data["saturation"]))
+
+            lut_target = data["lut"]
+            for i in range(self.cb_lut.count()):
+                if self.cb_lut.itemData(i) == lut_target:
+                    self.cb_lut.setCurrentIndex(i)
+                    break
+            self.chk_pulse.setChecked(bool(data["pulse-effect"]))
+            self.ds_fadeout.setValue(float(data["fade-out-seconds"]))
+
+            self.sl_bg.setValue(int(data["bg-volume"]))
+            self.sl_clip.setValue(int(data["clip-volume"]))
+            self.sl_rev.setValue(int(data["clip-reverb"]))
+
+            self.chk_bpm.setChecked(bool(data["bpm-detect"]))
+            self.ed_bpm.setText(str(data["bpm"]))
+            self.sb_min_beats.setValue(int(data["min-beats"]))
+            self.sb_max_beats.setValue(int(data["max-beats"]))
+            self.ds_beat_mode.setValue(float(data["beat-mode"]))
+            self.ds_min_seconds.setValue(float(data["min-seconds"]))
+            self.ds_max_seconds.setValue(float(data["max-seconds"]))
+
+            idx = self.cb_codec.findText(str(data["codec"]))
+            if idx != -1:
+                self.cb_codec.setCurrentIndex(idx)
+
+            idx = self.cb_codec_preset.findText(str(data["preset"]))
+            if idx != -1:
+                self.cb_codec_preset.setCurrentIndex(idx)
+
+            self.ed_bitrate.setText(str(data["bitrate"]))
+            self.ed_threads.setText(str(data["threads"]))
+            self.chk_preview.setChecked(bool(data["preview"]))
 
     def _autofill_video_folder(self):
         """
@@ -1947,8 +2078,8 @@ class PMVeaverQt(QtWidgets.QWidget):
             "--saturation", f"{self.sl_saturation.value() / 100.0:.2f}",
         ]
 
-        if self.cb_preset.isEnabled() and self.cb_preset.currentText():
-            args += ["--preset", self.cb_preset.currentText()]
+        if self.cb_codec_preset.isEnabled() and self.cb_codec_preset.currentText():
+            args += ["--preset", self.cb_codec_preset.currentText()]
         if self.ed_bitrate.text().strip():
             args += ["--bitrate", self.ed_bitrate.text().strip()]
         if self.ed_threads.text().strip():
