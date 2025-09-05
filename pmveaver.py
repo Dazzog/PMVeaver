@@ -231,7 +231,7 @@ def pick_segment_bounds_random_seconds(duration: float, min_s: float, max_s: flo
     if duration <= 0:
         return 0.0, 0.0
 
-    seg_len = random.uniform(min_s, max_s)
+    seg_len = _rng.uniform(min_s, max_s)
     # Versuchen, komplett im Fenster zu bleiben
     s, e = _choose_start_in_window(duration, seg_len, lo_frac, hi_frac)
     if e > s:
@@ -280,7 +280,7 @@ def _choose_start_in_window(duration: float, seg_len: float, lo_frac: float, hi_
         start = lo
         return start, start + seg_len
 
-    start = random.uniform(lo, hi - seg_len)
+    start = _rng.uniform(lo, hi - seg_len)
     return start, start + seg_len
 
 
@@ -330,7 +330,7 @@ def make_triptych(clipA: VideoFileClip, clipB: VideoFileClip, target_w: int, tar
     A_scaled = cover_scale_and_crop(clipA, panel_w, target_h)
     A_mirrored = A_scaled.fx(vfx.mirror_x)
 
-    if random.choice([True, False]):
+    if _rng.choice([True, False]):
         A_left, A_right = A_scaled, A_mirrored
     else:
         A_left, A_right = A_mirrored, A_scaled
@@ -401,7 +401,7 @@ def choose_even_beats(min_beats: int, max_beats: int, mode_pos: float = 0.25) ->
             w = 1.0 - abs(b - mode) / denom
             weights.append(max(w, MIN_WEIGHT))
 
-    return random.choices(evens, weights=weights, k=1)[0]
+    return _rng.choices(evens, weights=weights, k=1)[0]
 
 def estimate_beat_offset_with_librosa(audio_path: Path, bpm_hint: Optional[float] = None) -> Tuple[float, float]:
     """
@@ -594,8 +594,8 @@ def _maybe_start_one_beat_run() -> int:
     Liefert die Anzahl der noch *zusätzlich* zu produzierenden 1er (also Restlauf).
     """
     # Du kannst die Startwahrscheinlichkeit gerne anpassen:
-    if random.random() < 0.0:  # 5% Chance, einen 1-Beat-Lauf zu beginnen
-        run_len = random.choice([4, 8, 16])
+    if _rng.random() < 0.0:  # 5% Chance, einen 1-Beat-Lauf zu beginnen
+        run_len = _rng.choice([4, 8, 16])
         # Wir geben "Rest" zurück, denn den *ersten* 1er liefern wir direkt
         return run_len - 1
     return 0
@@ -874,7 +874,7 @@ def build_montage(
 
             else:  # choice == "portrait"
                 # Reuse previous side as current center with given probability
-                if carry_portrait_path is not None and random.random() < triptych_carry:
+                if carry_portrait_path is not None and _rng.random() < triptych_carry:
                     pathA = next_portrait()
                     if pathA is None:
                         continue
@@ -998,8 +998,13 @@ def build_montage(
             frame = get_frame(t)  # np.uint8 (H,W,3) oder (H,W,4) / Maske wäre (H,W)
 
             beat_factor = _pulse_intensity(t)  # 0..1 aus BPM-Phase
-            vol_factor = volume_at(t)  # 0..1 aus Audio
-            inten = beat_factor * (0.2 + vol_factor * 2)
+
+            vol_sum = 0
+            for ti in range(round(t - fps), round(t)):
+                vol_sum += volume_at(t)
+            vol_factor = vol_sum / fps
+
+            inten = beat_factor * (0.1 + vol_factor * 2)
 
             if inten <= 1e-6:
                 return frame
@@ -1468,11 +1473,9 @@ def kenburns_cover(
     direction: Optional[str] = None,
     zoom_in: bool = True,
     zoom_amount: float = 0.08,
-    rng: Optional[random.Random] = None,
 ) -> ImageClip:
-    rng = rng or _rng
     if direction is None:
-        direction = rng.choice(['left','right','up','down','diag1','diag2'])
+        direction = _rng.choice(['left','right','up','down','diag1','diag2'])
 
     src_w, src_h = img_clip.size
     if src_w == 0 or src_h == 0:
@@ -1597,6 +1600,12 @@ def parse_args(argv=None):
                    help="Saturation (0.0–3.0, 1.0 = neutral).")
     p.add_argument("--lut", type=Path, help="Optional LUT file.")
 
+    p.add_argument(
+        "--seed",
+        type=int,
+        help="Seed for deterministic random number generator."
+    )
+
     args = p.parse_args(argv)
 
     # --- Clamping & Sanitizing ---
@@ -1664,6 +1673,18 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     start_stdin_exit_watcher("__PMVEAVER_EXIT__")
+
+    if args.seed is not None:
+        _rng.seed(args.seed)
+        random.seed(args.seed)
+        print(f"PMVeaver - Using random seed: {args.seed}")
+    else:
+        import time
+        generated_seed = int(time.time() * 1000) % (2 ** 32)
+        _rng.seed(generated_seed)
+        random.seed(generated_seed)
+        print(f"PMVeaver - Generated random seed: {generated_seed}")
+
     build_montage(
         audio_path=args.audio,
         videos_spec=args.videos,

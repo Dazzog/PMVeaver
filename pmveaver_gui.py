@@ -550,6 +550,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         # ----- Accordion (QToolBox) for settings
         acc = QtWidgets.QToolBox()
         acc.addItem(self._panel_frame_render(), "Frame / Render")
+        acc.addItem(self._panel_seed(),         "Seed")
         acc.addItem(self._panel_effects(),      "Filters / Effects")
         acc.addItem(self._panel_audio_mix(),    "Audio Mix")
         acc.addItem(self._panel_bpm(),          "BPM / Beat lengths")
@@ -635,6 +636,27 @@ class PMVeaverQt(QtWidgets.QWidget):
         # Keep labels narrow
         for col in (0, 2):
             g.setColumnMinimumWidth(col, 80)
+
+        return w
+    
+    def _panel_seed(self):
+        w = QtWidgets.QWidget()
+        w.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Maximum)
+        g = QtWidgets.QGridLayout(w)
+        g.setSpacing(16)
+
+        self.chk_seed = QtWidgets.QCheckBox("Use fixed seed")
+        self.chk_seed.setChecked(False)
+
+        self.ed_seed = QtWidgets.QSpinBox()
+        self.ed_seed.setMinimum(0)
+        self.ed_seed.setMaximum((2 ** 31) - 1)
+        self.ed_seed.setEnabled(False)
+
+        self.chk_seed.toggled.connect(self.ed_seed.setEnabled)
+
+        g.addWidget(self.chk_seed, 0, 0)
+        g.addWidget(self.ed_seed, 0, 1)
 
         return w
 
@@ -1088,6 +1110,13 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         if hasattr(self, "console_win") and self.console_win:
             self.console_win.append_text(text)
+
+        for line in text.splitlines():
+            if "random seed:" in line:
+                m = re.search(r"random seed:\s*(\d+)", line)
+                if m:
+                    seed_val = m.group(1)
+                    self.ed_seed.setValue(int(seed_val))
 
     def _on_finished(self, exit_code: int, status: QtCore.QProcess.ExitStatus):
         if self._aborted:
@@ -2135,6 +2164,9 @@ class PMVeaverQt(QtWidgets.QWidget):
                 lut_path = self.cb_lut.itemData(idx)
                 if lut_path:
                     args += ["--lut", _norm(lut_path)]
+
+        if self.chk_seed.isChecked():
+            args += ["--seed", str(self.ed_seed.value())]
 
         return args
 
