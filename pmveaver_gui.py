@@ -6,7 +6,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import qdarktheme
 import builtins
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 APP_TITLE = "PMVeaver v" + __version__
 
@@ -533,15 +533,20 @@ class PMVeaverQt(QtWidgets.QWidget):
         presets_layout.setSpacing(8)
         presets_layout.addWidget(QtWidgets.QLabel("Preset: "), stretch=0)
 
-        self.cb_preset = QtWidgets.QComboBox();
+        self.cb_preset = QtWidgets.QComboBox()
+        self.cb_preset.currentIndexChanged.connect(self._load_preset)
         presets_layout.addWidget(self.cb_preset, stretch=1)
         QtCore.QTimer.singleShot(0, self._scan_presets)  # initially populate list
 
-        btn_preset_load = QtWidgets.QPushButton("Load Preset")
-        btn_preset_load.clicked.connect(self._load_preset)
-        presets_layout.addWidget(btn_preset_load)
+        btn_presets_reload = self.IconButton("\ue5d5")
+        btn_presets_reload.clicked.connect(self._scan_presets)
+        presets_layout.addWidget(btn_presets_reload)
 
-        btn_preset_save = QtWidgets.QPushButton("Save Preset")
+        self.btn_preset_delete = self.IconButton("\ue92b")
+        self.btn_preset_delete.clicked.connect(self._delete_preset)
+        presets_layout.addWidget(self.btn_preset_delete)
+
+        btn_preset_save = self.IconButton("\ue161")
         btn_preset_save.clicked.connect(self._save_preset)
         presets_layout.addWidget(btn_preset_save)
 
@@ -1734,6 +1739,9 @@ class PMVeaverQt(QtWidgets.QWidget):
                         items.append(str(p))
 
         self.cb_preset.clear()
+
+        self.cb_preset.addItem("(Default)", None)
+
         for it in items:
             name = os.path.basename(it)
             self.cb_preset.addItem(name, it)
@@ -1743,6 +1751,34 @@ class PMVeaverQt(QtWidgets.QWidget):
         if not items:
             tip += " (No files found – supported extensions: .json)"
         self.cb_preset.setToolTip(tip)
+
+    def _delete_preset(self):
+        idx = self.cb_preset.currentIndex()
+        if idx < 0:
+            return
+
+        preset_path = self.cb_preset.itemData(idx)
+        if preset_path is None:
+            return
+
+        p = Path(preset_path)
+        if not p.exists() or not p.is_file():
+            self._scan_presets()
+            return
+
+        ret = QtWidgets.QMessageBox.question(
+            self,
+            "Delete preset",
+            f"Are you sure you want to delete the preset '{self.cb_preset.currentText()}?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No
+        )
+        if ret == QtWidgets.QMessageBox.Yes:
+            try:
+                p.unlink()
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Error", f"Preset could ne be deleted:\n{e}")
+            self._scan_presets()
 
     def _save_preset(self):
         preset_data = {
@@ -1795,9 +1831,49 @@ class PMVeaverQt(QtWidgets.QWidget):
 
             self._scan_presets()
 
+            index = self.cb_preset.findText(preset_name)
+            if index != -1:
+                self.cb_preset.setCurrentIndex(index)
+
     def _load_preset(self):
         idx = self.cb_preset.currentIndex()
+
+        if idx < 0:
+            self.btn_preset_delete.setEnabled(False)
+            return
+
         preset_path = self.cb_preset.itemData(idx)
+
+        if preset_path is None:
+            # Set default values
+            self.sb_w.setValue(1920)
+            self.sb_h.setValue(1080)
+            self.ds_triptych_carry.setValue(30)
+            self.sb_fps.setValue(30.0)
+            self.sl_contrast.setValue(100)
+            self.sl_saturation.setValue(100)
+            self.chk_pulse.setChecked(False)
+            self.ds_fadeout.setValue(0.0)
+            self.sl_bg.setValue(100)
+            self.sl_clip.setValue(80)
+            self.sl_rev.setValue(20)
+            self.chk_bpm.setChecked(True)
+            self.ed_bpm.setText("")
+            self.sb_min_beats.setValue(2)
+            self.sb_max_beats.setValue(8)
+            self.ds_beat_mode.setValue(0.25)
+            self.ds_min_seconds.setValue(2.0)
+            self.ds_max_seconds.setValue(5.0)
+            self.cb_codec.setCurrentText("libx264")
+            self.cb_codec_preset.setCurrentText("medium")
+            self.ed_bitrate.setText("8M")
+            self.ed_threads.setText("8")
+            self.chk_preview.setChecked(True)
+            self.ed_seed.setValue(0)
+            self.cb_audio.setCurrentText("aac")
+            self.btn_preset_delete.setEnabled(False)
+            return
+
         if preset_path:
             with open(preset_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -1841,6 +1917,8 @@ class PMVeaverQt(QtWidgets.QWidget):
             self.ed_bitrate.setText(str(data["bitrate"]))
             self.ed_threads.setText(str(data["threads"]))
             self.chk_preview.setChecked(bool(data["preview"]))
+
+            self.btn_preset_delete.setEnabled(True)
 
     def _autofill_video_folder(self):
         """
