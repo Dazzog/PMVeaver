@@ -2170,6 +2170,12 @@ class PMVeaverQt(QtWidgets.QWidget):
 
         return args
 
+    def closeEvent(self, event):
+        if self.console_win is not None:
+            self.console_win.close()
+
+        super().closeEvent(event)
+
 
 def resource_path(rel: str) -> str:
     base = getattr(sys, "_MEIPASS", Path(__file__).parent)
