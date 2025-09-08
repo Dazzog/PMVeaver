@@ -71,7 +71,8 @@ datas = (
     collect_data_files('librosa') +
     collect_data_files('resampy') +
     collect_data_files('audioread') +
-    collect_data_files('pooch')
+    collect_data_files('pooch') +
+    [('.venv/Lib/site-packages/redgifs/tags.json', 'redgifs')]
 )
 
 # SoundFile bringt die libsndfile-1.dll & Co mit

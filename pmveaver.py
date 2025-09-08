@@ -55,6 +55,7 @@ import tempfile
 import atexit, signal
 import math
 import threading
+
 import numpy as np, time, os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Set
@@ -74,7 +75,7 @@ from PIL import Image as _PIL_Image
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".mpg", ".gif"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -577,7 +578,7 @@ class _ClipCache:
     def close_all(self):
         for clip in self._cache.values():
             try:
-                clip.close()
+                safe_close_clip(clip)
             except Exception:
                 pass
         self._cache.clear()
@@ -734,7 +735,24 @@ def _build_vf_graph(contrast: float, saturation: float, lut: Optional[Path]) -> 
 
     return ",".join(graph_parts) if graph_parts else None
 
+def safe_close_clip(clip):
+    if clip is None and hasattr(clip, "close"):
+        return
+    try:
+        clip.close()
+    except OSError as e:
+        # Unter Windows: WinError 6 = ungültiges Handle, ignorieren
+        import sys
+        if sys.platform == "win32" and "WinError 6" in str(e):
+            # Still ignorieren
+            pass
+        else:
+            # Andere OS-Errors neu werfen
+            raise
+
 # ---------------- main build ----------------
+
+temp_dirs_to_cleanup: List[str] = []
 
 def build_montage(
     audio_path: Path,
@@ -807,13 +825,17 @@ def build_montage(
     else:
         target_duration = bg_audio.duration
 
-    specs = _parse_videos_spec(videos_spec)
+    specs, temp_dirs = _parse_videos_spec(videos_spec, bpm, target_duration, min_seconds, max_seconds, min_beats, max_beats)
+
+    for dir in temp_dirs:
+        temp_dirs_to_cleanup.append(dir)
 
     unique_files: Set[Path] = set()
     for folder, _w in specs:
         unique_files.update(find_video_files(folder))
     if not unique_files:
-        raise RuntimeError("No video files found")
+        print("PMVeaver - Error: No video files found. Please check your --videos input.", file=sys.stderr)
+        return None
 
     print(f"PMVeaver - Found {len(list(unique_files))} video file(s) total")
 
@@ -922,8 +944,8 @@ def build_montage(
                 subB = srcB.subclip(sB, eB)
                 dur = min(subA.duration, subB.duration)
                 if dur <= 0:
-                    subA.close();
-                    subB.close()
+                    safe_close_clip(subA)
+                    safe_close_clip(subB)
                     continue
 
                 subA = subA.subclip(0, dur)
@@ -1041,7 +1063,6 @@ def build_montage(
 
     # ----- Audio: normalize (+ optional denoise) -> (optional reverb) -> export stems -> mix with bg -----
     clip_audio = montage.audio
-    temp_dirs_to_cleanup: List[str] = []
 
     if clip_audio is not None and (clip_volume <= 1e-6 and clip_reverb <= 1e-6):
         clip_audio = None  # komplette Audio-Verarbeitung auslassen
@@ -1227,42 +1248,38 @@ def build_montage(
 
     # Cleanup
     try:
-        # Falls CompositeAudioClip verwendet wurde, schließen
         try:
-            if montage.audio is not None and hasattr(montage.audio, "close"):
-                montage.audio.close()
+            safe_close_clip(montage.audio)
         except Exception:
             pass
 
         try:
-            if montage_with_preview is not montage and hasattr(montage_with_preview, "close"):
-                montage_with_preview.close()
+            safe_close_clip(montage_with_preview)
         except Exception:
             pass
 
         try:
-            montage.close()
+            safe_close_clip(montage)
         except Exception:
             pass
 
-        # Hintergrund-Audio explizit schließen
         try:
-            bg_audio.close()
+            safe_close_clip(bg_audio)
         except Exception:
             pass
 
-        # Eventuell erzeugtes Clip-Audio schließen (nass/normalisiert)
         try:
-            if clip_audio is not None and hasattr(clip_audio, "close"):
-                clip_audio.close()
+            safe_close_clip(clip_audio)
         except Exception:
             pass
     except Exception:
         pass
 
     for seg in segments:
-        try: seg.close()
-        except Exception: pass
+        try:
+            safe_close_clip(seg)
+        except Exception:
+            pass
 
     clip_cache.close_all()
 
@@ -1284,6 +1301,13 @@ def setup_tempfile_cleanup(out_path):
             for f in out_path.parent.glob(f"{out_path.stem}TEMP_MPY_*"):
                 try:
                     f.unlink()
+                except Exception:
+                    pass
+
+            # Delete temporaty folders
+            for d in temp_dirs_to_cleanup:
+                try:
+                    shutil.rmtree(d, ignore_errors=True)
                 except Exception:
                     pass
         except Exception:
@@ -1333,53 +1357,87 @@ def start_stdin_exit_watcher(token: str = "__PMVEAVER_EXIT__"):
                 pass
     threading.Thread(target=_runner, daemon=True).start()
 
-def _parse_videos_spec(spec: str) -> List[Tuple[Path, int]]:
-    """
-    Akzeptiert entweder:
-      - einen einzelnen Ordnerpfad (Rückgabe [(Path, 1)]), oder
-      - eine Liste "dir[:w],dir[:w],..." wobei w eine ganze Zahl ≥ 1 ist.
-    Windows-Pfade mit Laufwerksbuchstaben (z. B. "C:\...") werden korrekt behandelt,
-    weil nur das *letzte* ':' als potentieller Trenner betrachtet wird.
-    """
-    # Einzelner Ordnerpfad?
-    p0 = Path(spec).expanduser()
-    if p0.is_dir():
-        out_single = [(p0, 1)]
-        return out_single
+def _parse_videos_spec(spec: str, bpm: Optional[float], audio_duration: float,
+                      min_seconds: float, max_seconds: float, min_beats: int, max_beats: int) -> List[Tuple[Path, int]]:
+    out = []
+    temp_dirs = []
 
-    out: List[Tuple[Path, int]] = []
+    # Klare Hilfsfunktion zur Clipanzahl basierend auf bpm etc.
+    def calc_required_clips() -> int:
+        multi = 3
+        if bpm is None or bpm <= 0:
+            avg_len = (min_seconds + max_seconds) / 2
+            return int(audio_duration / avg_len * multi)
+        beat_len = 60.0 / bpm
+        avg_beats = (min_beats + max_beats) / 2
+        avg_len = beat_len * avg_beats
+        return int(audio_duration / avg_len * multi)
+
+    required_clips = calc_required_clips()
+
+    # Redgifs-Download-Funktion (Platzhalter)
+    def download_redgifs_to_tempfolder(search_term: str, count: int) -> Path:
+        from redgifs import API, errors
+        api = API()
+        api.login()
+        tmpdir = Path(tempfile.mkdtemp(prefix="pmv_rg_"))
+
+        print(f"PMVeaver - Trying to download {count} redgif clips for query \"{search_term}\" to temp folder \"{tmpdir}\"")
+
+        actual_count = 0
+        try:
+            for i in tqdm(range(count), desc=f"Downloading Redgifs \"{search_term}\"", unit="clip", ncols=80):
+                try:
+                    result_count = 80
+                    pagingResult = api.search(search_term, count=1)
+                    total = pagingResult.total
+                    max_pages = math.ceil(min(total, 1000) / result_count)
+                    random_page = _rng.randint(1, max_pages)
+
+                    result = api.search(search_term, count=count, page=random_page)
+
+                    if result.gifs:
+                        random_gif = _rng.choice(result.gifs)
+                        video_url = random_gif.urls.hd
+                        file_path = tmpdir / f"{random_gif.id}.mp4"
+                        api.download(video_url, str(file_path))
+                        actual_count += 1
+                except errors.HTTPException as he:
+                    if he.status == 429:
+                        print(f"PMVeaver - Rate limit hit when downloading Redgifs for \"{search_term}\"")
+                        break
+                    else:
+                        print(f"PMVeaver - HTTP error during download: {he}")
+                        break
+                except Exception as e:
+                    print(f"PMVeaver - Error during download: {e}")
+                    break
+        finally:
+            api.close()
+
+            print(f"PMVeaver - Downloaded {actual_count} redgif clips for query \"{search_term}\"")
+
+            api.close()
+            return tmpdir
+
     for raw in (spec or "").split(","):
-        part = raw.strip()
+        part = raw.strip().strip('"').strip("'")
         if not part:
             continue
+        d, w = part, 1
+        if ":" in part:
+            head, tail = part.rsplit(":", 1)
+            if tail.isdigit():
+                d, w = head.strip(), int(tail)
+        p = Path(d).expanduser()
+        if p.is_dir():
+            out.append((p, w))
+        else:
+            temp_dir = download_redgifs_to_tempfolder(d, required_clips)
+            temp_dirs.append(temp_dir)
+            out.append((temp_dir, w))
 
-        # optionale Quotes entfernen, Whitespaces trimmen
-        s = part.strip().strip('"').strip("'")
-
-        # Standard: ganzes Segment ist Pfad, Gewicht = 1
-        d, w = s, 1
-
-        # Gewicht NUR erkennen, wenn der *rechte* Teil eine Ganzzahl ist
-        if ":" in s:
-            head, tail = s.rsplit(":", 1)
-            t = tail.strip()
-            if t.isdigit():
-                d, w = head, int(t)
-            else:
-                d, w = s, 1  # kein gültiges Gewicht → kompletter String ist Pfad
-
-        d_path = Path(d).expanduser()
-        if not d_path.is_dir():
-            raise ValueError(f"--videos: directory not found: {d_path}")
-        if w <= 0:
-            raise ValueError(f"--videos: weight must be >=1 in entry '{raw}'")
-
-        out.append((d_path, w))
-
-    if not out:
-        raise ValueError("--videos: no valid directories")
-
-    return out
+    return out, temp_dirs
 
 def _build_weighted_pools(
     specs: List[Tuple[Path, int]],
@@ -1548,9 +1606,9 @@ def parse_args(argv=None):
         "--videos",
         type = str,
         required = True,
-        help = "Ordner mit Videos. Auch mehrere mit Gewichtung möglich: "
-        '"DIR[:weight],DIR[:weight],..."  (z.B. "cats:1,dogs:2"). '
-        "Ohne ':weight' = 1. Abwärtskompatibel: einzelner Ordnerpfad bleibt gültig."
+        help = "Path to video files or search query fpr redgifs. Allows for multiple entries with weigths: "
+        '"ENTRY[:weight],ENTRY[:weight],..."  (z.B. "cats:1,dogs:2"). '
+        "Without ':weight' = 1."
         )
     p.add_argument("--output", type=Path, required=True)
 
@@ -1685,39 +1743,44 @@ def main(argv=None):
         random.seed(generated_seed)
         print(f"PMVeaver - Generated random seed: {generated_seed}")
 
-    build_montage(
-        audio_path=args.audio,
-        videos_spec=args.videos,
-        out_path=args.output,
-        min_seconds=args.min_seconds,
-        max_seconds=args.max_seconds,
-        fps=args.fps,
-        width=args.width,
-        height=args.height,
-        codec=args.codec,
-        audio_codec=args.audio_codec,
-        preset=args.preset,
-        bitrate=args.bitrate,
-        threads=args.threads,
-        bg_volume=args.bg_volume,
-        clip_volume=args.clip_volume,
-        clip_reverb=args.clip_reverb,
-        bpm=args.bpm,
-        bpm_detect=args.bpm_detect,
-        min_beats=args.min_beats,
-        max_beats=args.max_beats,
-        beat_mode=args.beat_mode,
-        preview=args.preview,
-        triptych_carry=args.triptych_carry,
-        pulse_effect=args.pulse_effect,
-        trim_large_clips = args.trim_large_clips,
-        fade_out_seconds=args.fade_out_seconds,
-        intro_path=args.intro,
-        outro_path=args.outro,
-        contrast=args.contrast,
-        saturation=args.saturation,
-        lut=args.lut,
-    )
+    try:
+        build_montage(
+            audio_path=args.audio,
+            videos_spec=args.videos,
+            out_path=args.output,
+            min_seconds=args.min_seconds,
+            max_seconds=args.max_seconds,
+            fps=args.fps,
+            width=args.width,
+            height=args.height,
+            codec=args.codec,
+            audio_codec=args.audio_codec,
+            preset=args.preset,
+            bitrate=args.bitrate,
+            threads=args.threads,
+            bg_volume=args.bg_volume,
+            clip_volume=args.clip_volume,
+            clip_reverb=args.clip_reverb,
+            bpm=args.bpm,
+            bpm_detect=args.bpm_detect,
+            min_beats=args.min_beats,
+            max_beats=args.max_beats,
+            beat_mode=args.beat_mode,
+            preview=args.preview,
+            triptych_carry=args.triptych_carry,
+            pulse_effect=args.pulse_effect,
+            trim_large_clips = args.trim_large_clips,
+            fade_out_seconds=args.fade_out_seconds,
+            intro_path=args.intro,
+            outro_path=args.outro,
+            contrast=args.contrast,
+            saturation=args.saturation,
+            lut=args.lut,
+        )
+
+    except Exception as e:
+        print(f"PMVeaver - Fehler: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

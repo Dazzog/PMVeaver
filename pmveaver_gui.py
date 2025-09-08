@@ -6,12 +6,13 @@ from PySide6 import QtCore, QtGui, QtWidgets
 import qdarktheme
 import builtins
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 APP_TITLE = "PMVeaver v" + __version__
 
 # Progress weights
 STEP_WEIGHTS = {
+    "downloading redgifs": (0.0, 0.0),
     "collecting clips": (0.0, 0.1),
     "building video": (0.1, 0.125),
     "writing audio": (0.125, 0.15),
@@ -435,8 +436,8 @@ class PMVeaverQt(QtWidgets.QWidget):
         row1.addWidget(self.lbl_step)
         row1.addStretch()
 
-        self.lbl_elapsed_step = QtWidgets.QLabel("Elapsed (Current step): —")
-        self.lbl_eta_step = QtWidgets.QLabel("ETA (Current step): —")
+        self.lbl_elapsed_step = QtWidgets.QLabel("Elapsed: —")
+        self.lbl_eta_step = QtWidgets.QLabel("ETA: —")
         row1.addWidget(self.lbl_elapsed_step)
         row1.addSpacing(10)
         row1.addWidget(self.lbl_eta_step)
@@ -1170,7 +1171,9 @@ class PMVeaverQt(QtWidgets.QWidget):
     def _phase_from_line(self, s: str) -> str | None:
         sl = s.lower()
 
-        # 1) Direkte CLI-Logs
+        if "downloading redgifs" in sl:
+            return "Downloading redgifs"
+
         if sl.startswith("collecting clips") or "collecting clips:" in sl:
             return "Collecting clips"
 
@@ -1209,9 +1212,9 @@ class PMVeaverQt(QtWidgets.QWidget):
             text
         )
         if m2:
-            self.lbl_elapsed_step.setText(f"Elapsed (Current step): {m2.group('elapsed')}")
+            self.lbl_elapsed_step.setText(f"Elapsed: {m2.group('elapsed')}")
             eta = m2.group('eta') or "—"
-            self.lbl_eta_step.setText(f"ETA (Current step): {eta}")
+            self.lbl_eta_step.setText(f"ETA: {eta}")
 
     def _set_phase(self, name: str):
         key = name.lower()
@@ -1230,8 +1233,8 @@ class PMVeaverQt(QtWidgets.QWidget):
         # Step reset (only step, not total)
         self._last_step_pct = 0
         self.pb_step.setValue(0)
-        self.lbl_elapsed_step.setText("Elapsed (Current step): —")
-        self.lbl_eta_step.setText("ETA (Current step): —")
+        self.lbl_elapsed_step.setText("Elapsed: —")
+        self.lbl_eta_step.setText("ETA: —")
 
     def _reset_progress(self):
         self._overall_progress = 0.0
@@ -1239,8 +1242,8 @@ class PMVeaverQt(QtWidgets.QWidget):
         self._start_time = None
         self.pb_step.setValue(0)
         self.pb_total.setValue(0)
-        self.lbl_elapsed_step.setText("Elapsed (Current step): —")
-        self.lbl_eta_step.setText("ETA (Current step): —")
+        self.lbl_elapsed_step.setText("Elapsed: —")
+        self.lbl_eta_step.setText("ETA: —")
         self.lbl_elapsed_total.setText("Elapsed (Total): —")
 
         self._last_preview_check = 0.0
@@ -1373,7 +1376,7 @@ class PMVeaverQt(QtWidgets.QWidget):
         h.setSpacing(6)
 
         ed_path = DirDropLineEdit()
-        ed_path.setPlaceholderText("Select video folder…")
+        ed_path.setPlaceholderText("Video folder path or Redgifs search query")
         if path: ed_path.setText(_norm(path))
 
         btn_browse = self.IconButton("\ue2c7")
@@ -1448,24 +1451,6 @@ class PMVeaverQt(QtWidgets.QWidget):
             else:
                 parts.append(f"{p}:{w}")
         return ",".join(parts)
-
-    def _check_video_rows_valid(self) -> bool:
-        """
-        Validation: Each filled path must be an existing directory.
-        Weight (if specified) must be valid (≥1) – ensured by the validator.
-        At least *one* row must be filled.
-        """
-        any_filled = False
-        for r in self.video_rows:
-            path_txt = r["path"].text().strip()
-            if not path_txt:
-                continue
-            any_filled = True
-            p = _norm(path_txt)
-            if not Path(p).is_dir():
-                return False
-            # empty weight ⇒ 1; if set, it’s valid thanks to validator
-        return any_filled
 
     def _set_video_rows_from_guess(self, guess_path: str | None):
         """
@@ -2033,7 +2018,6 @@ class PMVeaverQt(QtWidgets.QWidget):
         inp = self._collect_inputs()
         ok_audio = bool(inp["audio"])
         ok_out = bool(inp["output"])
-        ok_vdir = self._check_video_rows_valid()
 
         self._set_field_state(
             self.ed_audio, ok_audio,
@@ -2046,15 +2030,7 @@ class PMVeaverQt(QtWidgets.QWidget):
             "Please specify a valid output path."
         )
 
-        if ok_vdir:
-            self.videos_container.setStyleSheet("")
-            self.videos_container.setToolTip("Video folder/list is valid.")
-        else:
-            # Leichte rote Outline als Hinweis
-            self.videos_container.setStyleSheet("QWidget { border: 1px solid #d9534f; border-radius: 4px; }")
-            self.videos_container.setToolTip("Please specify valid folder(s). Empty weighting means 1.")
-
-        all_ok = ok_audio and ok_vdir and ok_out
+        all_ok = ok_audio and ok_out
 
         # Start-Button nur aktivieren, wenn alles passt
         self.btn_start.setEnabled(all_ok and not self.running)
@@ -2062,7 +2038,6 @@ class PMVeaverQt(QtWidgets.QWidget):
         if show_message and not all_ok:
             missing = []
             if not ok_audio: missing.append("Audio file")
-            if not ok_vdir:  missing.append("Video folder")
             if not ok_out:   missing.append("Output filder")
             QtWidgets.QMessageBox.warning(
                 self, "Required fields are missing",
