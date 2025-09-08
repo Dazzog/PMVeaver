@@ -1389,7 +1389,13 @@ def _parse_videos_spec(spec: str, bpm: Optional[float], audio_duration: float,
             for i in tqdm(range(count), desc=f"Downloading Redgifs \"{search_term}\"", unit="clip", ncols=80):
                 try:
                     result_count = 80
-                    pagingResult = api.search(search_term, count=1)
+
+                    if search_term.startswith("user:"):
+                        username = search_term[len("user:"):]
+                        pagingResult = api.search_creator(username, count=1)
+                    else:
+                        pagingResult = api.search(search_term, count=1)
+
                     total = pagingResult.total
                     max_pages = math.ceil(min(total, 1000) / result_count)
                     random_page = _rng.randint(1, max_pages)
