@@ -1866,7 +1866,7 @@ class PMVeaverQt(QtWidgets.QWidget):
             self.sb_w.setValue(int(data["width"]))
             self.sb_h.setValue(int(data["height"]))
             self.ds_triptych_carry.setValue(float(data["triptych-carry"]))
-            self.sb_fps.setValue(int(data["fps"]))
+            self.sb_fps.setValue(float(data["fps"]))
 
             self.sl_contrast.setValue(int(data["contrast"]))
             self.sl_saturation.setValue(int(data["saturation"]))
