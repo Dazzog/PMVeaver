@@ -75,7 +75,7 @@ from PIL import Image as _PIL_Image
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".mpg", ".gif"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -1385,11 +1385,10 @@ def _parse_videos_spec(spec: str, bpm: Optional[float], audio_duration: float,
         print(f"PMVeaver - Trying to download {count} redgif clips for query \"{search_term}\" to temp folder \"{tmpdir}\"")
 
         actual_count = 0
+        result_count = 80
         try:
-            for i in tqdm(range(count), desc=f"Downloading Redgifs \"{search_term}\"", unit="clip", ncols=80):
+            for i in tqdm(range(count), desc=f"Downloading Redgifs \"{search_term}\"", unit="clip", ncols=result_count):
                 try:
-                    result_count = 80
-
                     if search_term.startswith("user:"):
                         username = search_term[len("user:"):]
                         pagingResult = api.search_creator(username, count=1)
@@ -1397,10 +1396,13 @@ def _parse_videos_spec(spec: str, bpm: Optional[float], audio_duration: float,
                         pagingResult = api.search(search_term, count=1)
 
                     total = pagingResult.total
-                    max_pages = math.ceil(min(total, 1000) / result_count)
+                    max_pages = min(math.ceil(total / result_count), 12)
                     random_page = _rng.randint(1, max_pages)
 
-                    result = api.search(search_term, count=count, page=random_page)
+                    if search_term.startswith("user:"):
+                        result = api.search_creator(username, count=result_count, page=random_page)
+                    else:
+                        result = api.search(search_term, count=result_count, page=random_page)
 
                     if result.gifs:
                         random_gif = _rng.choice(result.gifs)
